@@ -7,7 +7,7 @@ module registers # (
 ) (
 		input wire clk,
 		input wire reset,
-		input wire enable
+		input wire enable,
 		
 		input reg[7:0] block_id,
 		input reg[2:0] core_state,
@@ -29,5 +29,13 @@ module registers # (
 	  output reg [DATA_BITS-1:0] rc, //FMA support
 		
 );
+
+	  localparam ARITHMETIC = 2'b00,
+	  			 MEMORY = 2'b01,
+				 CONSTANT = 2'b10;
+	  
+	  reg [DATA_BITS - 1:0] registers [15:0];
+
+	  
 
 endmodule
