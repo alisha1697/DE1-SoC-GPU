@@ -1,0 +1,58 @@
+m255
+K4
+z2
+13
+!s112 1.1
+!i10d 8192
+!i10e 25
+!i10f 100
+cModel Technology
+dC:/Users/User/Desktop/applications/Kardium/2025/Stretcher
+vscheduler
+Z0 DXx6 sv_std 3 std 0 22 AD7iAPLo6nTIKk<N0eo=D3
+!s110 1778357559
+!i10b 1
+!s100 eKeRM<c?T;z8e:dI8A>?@3
+I<C1CdWLWFZIMb03N96@1g1
+Z1 VDg1SIo80bB@j0V0VzS_@n1
+!s105 scheduler_sv_unit
+S1
+Z2 dC:/Users/User/Desktop/Year 3/DE1-SoC-GPU/src/tb/Schdeuler.sv
+w1778356732
+8C:/Users/User/Desktop/Year 3/DE1-SoC-GPU/src/tb/Schdeuler.sv/scheduler.sv
+FC:/Users/User/Desktop/Year 3/DE1-SoC-GPU/src/tb/Schdeuler.sv/scheduler.sv
+L0 16
+Z3 OV;L;10.5b;63
+r1
+!s85 0
+31
+!s108 1778357559.000000
+!s107 C:/Users/User/Desktop/Year 3/DE1-SoC-GPU/src/tb/Schdeuler.sv/scheduler.sv|
+!s90 -reportprogress|300|-work|work|-sv|-stats=none|C:/Users/User/Desktop/Year 3/DE1-SoC-GPU/src/tb/Schdeuler.sv/scheduler.sv|
+!i113 1
+Z4 o-work work -sv
+Z5 tCvgOpt 0
+vscheduler_tb
+R0
+!s110 1778357558
+!i10b 1
+!s100 BK^GV8e=ILWl8J7<8mn7P2
+I[Kc76jAZ7Fe]BHSMHZPO_0
+R1
+!s105 scheduler_tb_sv_unit
+S1
+R2
+w1778357556
+8C:/Users/User/Desktop/Year 3/DE1-SoC-GPU/src/tb/Schdeuler.sv/scheduler_tb.sv
+FC:/Users/User/Desktop/Year 3/DE1-SoC-GPU/src/tb/Schdeuler.sv/scheduler_tb.sv
+L0 3
+R3
+r1
+!s85 0
+31
+!s108 1778357558.000000
+!s107 C:/Users/User/Desktop/Year 3/DE1-SoC-GPU/src/tb/Schdeuler.sv/scheduler_tb.sv|
+!s90 -reportprogress|300|-work|work|-sv|-stats=none|C:/Users/User/Desktop/Year 3/DE1-SoC-GPU/src/tb/Schdeuler.sv/scheduler_tb.sv|
+!i113 1
+R4
+R5
