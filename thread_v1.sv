@@ -45,7 +45,7 @@ module thread #(
     always_comb begin 
 
         // A[i][k] = base_addr_A + (i * N) + k  
-        addr_A = base_addr_A + (row * N) + j;
+        addr_A = base_addr_A + (i * N) + j;
 
         // B[k][j] = base_addr_B + (k*N)j;
         addr_B = base_addr_B + (k * N) + col;
