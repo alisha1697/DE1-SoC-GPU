@@ -1,0 +1,45 @@
+# ── ModelSim / QuestaSim build artifacts ──────────────────────────
+work/
+altera_mf/
+*.mpf
+*.cr.mti
+*.wlf
+wlf*
+*.qdb
+*.qpg
+*.qtl
+_vmake
+_info
+transcript
+
+# ── Backup files ───────────────────────────────────────────────────
+*.bak
+*.orig
+
+# ── Quartus build artifacts ────────────────────────────────────────
+db/
+incremental_db/
+output_files/
+*.qsf.bak
+*.rpt
+*.smsg
+*.summary
+*.pin
+*.sof
+*.pof
+*.jdi
+*.sld
+*.eda
+
+# ── Quartus MIF verification files (auto-generated) ───────────────
+*.ver
+
+# ── IDE artifacts ──────────────────────────────────────────────────
+.out-of-code-insights/
+.vscode/
+*.swp
+*~
+
+# ── OS artifacts ───────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
