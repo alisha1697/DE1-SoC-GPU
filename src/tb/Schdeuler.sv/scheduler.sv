@@ -33,9 +33,13 @@ module scheduler #(
     output logic [THREADS_PER_CORE-1:0]       fma_en,
     output logic [7:0]                        k,
 
-    // memory write 
-    output logic                              mem_write_en,
+    // Memory read handshake: scheduler requests a read, arbiter grants it
+    output logic                              mem_read_valid,
+    input  logic                              mem_read_ready,
 
+    // Memory write handshake: scheduler requests a write, arbiter grants it
+    output logic                              mem_write_valid,
+    input  logic                              mem_write_ready,
     
     output logic [3:0] state, // for testbench 
     output logic                              done
@@ -72,13 +76,10 @@ module scheduler #(
             done         <= 1'b0;
             data_valid   <= 0;
             fma_en       <= 0;
-            mem_write_en <= 1'b0;
         end else begin
-            // Default: deassert one-cycle pulses every cycle
+            // Default: deassert one-cycle FMA every cycle
             data_valid   <= 0;
             fma_en       <= 0;
-            mem_write_en <= 1'b0;
-
             case (state)
                 IDLE: begin
                     done <= 1'b0;
@@ -90,9 +91,14 @@ module scheduler #(
                     k_cnt <= 0;
                     state <= WAIT;
                 end
+                // WAIT: hold read request high until arbiter grants access.
+                // mem_read_valid is driven combinationally (see below).
+                // Only advance to FMA once mem_read_ready goes high — that is
+                // the cycle the arbiter routes our address to BRAM, so data
+                // will be valid on the very next cycle (1-cycle BRAM latency).
 
                 WAIT: begin
-                    state <= FMA;
+                    if (mem_read_ready) state <= FMA;
                 end
 
                 FMA: begin
@@ -120,10 +126,14 @@ module scheduler #(
                         state <= WAIT;
                     end
                 end
+                
+                // WRITE: hold write request high until arbiter grants access.
+                // mem_write_valid is driven combinationally (see below).
+                // Only advance to NEXT_W once mem_write_ready confirms the
+                // write was accepted by BRAM this cycle.
 
                 WRITE: begin
-                    mem_write_en <= 1'b1;
-                    state        <= NEXT_W;
+                    if (mem_write_ready) state <= NEXT_W;
                 end
 
                 NEXT_W: begin
@@ -147,5 +157,14 @@ module scheduler #(
     // Combinational outputs
     assign t_select = t_cnt[TSEL-1:0];
     assign k        = k_cnt;
+
+    // Read valid: asserted for the entire duration we are in WAIT.
+    // The arbiter sees this as "core wants BRAM read access".
+   
+    assign mem_read_valid  = (state == WAIT);
+
+    // Write valid: asserted for the entire duration we are in WRITE.
+    // The arbiter sees this as "core wants BRAM write access".
+    assign mem_write_valid = (state == WRITE);
 
 endmodule

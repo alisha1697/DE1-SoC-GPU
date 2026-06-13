@@ -2,9 +2,11 @@
 // gpu_top.sv — Top-Level GPU Module
 //
 // Instantiates and wires together all subsystems:
-//   1. dispatcher   — splits N² threads across cores in waves
-//   2. core[0..N]   — each core runs a block of threads with a scheduler
-//   3. mem_controller — round-robin BRAM arbiter, one read port + one write port
+//   1. dispatcher     — splits N² threads across cores in waves
+//   2. core[0..N]     — each core runs a block of threads with a scheduler
+//   3. mem_controller — round-robin arbiter for two separate BRAMs:
+//                         BRAM_A (read-only, holds input matrices A & B)
+//                         BRAM_C (write-only, holds output matrix C)
 //
 // This module contains NO logic. All behaviour lives in the submodules above.
 // =============================================================================
@@ -21,15 +23,15 @@ module gpu_top #(
     input  logic [7:0] N,
     input  logic [ADDR_WIDTH-1:0] base_addr_A, base_addr_B, base_addr_C,
 
-    // BRAM Port A (read) — wired to Quartus dual-port BRAM IP
-    input  logic [DATA_WIDTH-1:0] ram_rd_data_a,
-    output logic [ADDR_WIDTH-1:0] ram_addr_a,
-    output logic                  ram_rd_en_a,
+    // BRAM_A — read-only (holds input matrices A & B)
+    input  logic [DATA_WIDTH-1:0] bram_a_rd_data,
+    output logic [ADDR_WIDTH-1:0] bram_a_addr,
+    output logic                  bram_a_rd_en,
 
-    // BRAM Port B (write) — wired to Quartus dual-port BRAM IP
-    output logic                  ram_wr_en_b,
-    output logic [ADDR_WIDTH-1:0] ram_addr_b,
-    output logic [DATA_WIDTH-1:0] ram_wr_data_b,
+    // BRAM_C — write-only (holds output matrix C)
+    output logic                  bram_c_wr_en,
+    output logic [ADDR_WIDTH-1:0] bram_c_addr,
+    output logic [DATA_WIDTH-1:0] bram_c_wr_data,
 
     output logic done
 );
@@ -113,29 +115,31 @@ module gpu_top #(
     endgenerate
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 3. Memory Controller
+    // 3. Memory Controller — arbitrates two separate BRAMs
     // ─────────────────────────────────────────────────────────────────────────
     mem_controller #(
         .DATA_WIDTH (DATA_WIDTH),
         .ADDR_WIDTH (ADDR_WIDTH),
         .NUM_CORES  (NUM_CORES)
     ) u_mem_controller (
-        .clk             (clk),
-        .rst             (rst),
-        .core_read_valid (core_mem_read_valid),
-        .core_read_addr  (core_mem_read_addr),
-        .core_read_ready (core_mem_read_ready),
-        .core_read_data  (core_mem_read_data),
-        .core_write_valid(core_mem_write_valid),
-        .core_write_addr (core_mem_write_addr),
-        .core_write_data (core_mem_write_data),
-        .core_write_ready(core_mem_write_ready),
-        .ram_addr_a      (ram_addr_a),
-        .ram_rd_en_a     (ram_rd_en_a),
-        .ram_rd_data_a   (ram_rd_data_a),
-        .ram_addr_b      (ram_addr_b),
-        .ram_wr_data_b   (ram_wr_data_b),
-        .ram_wr_en_b     (ram_wr_en_b)
+        .clk              (clk),
+        .rst              (rst),
+        .core_read_valid  (core_mem_read_valid),
+        .core_read_addr   (core_mem_read_addr),
+        .core_read_ready  (core_mem_read_ready),
+        .core_read_data   (core_mem_read_data),
+        .core_write_valid (core_mem_write_valid),
+        .core_write_addr  (core_mem_write_addr),
+        .core_write_data  (core_mem_write_data),
+        .core_write_ready (core_mem_write_ready),
+        // BRAM_A (read-only)
+        .bram_a_addr      (bram_a_addr),
+        .bram_a_rd_en     (bram_a_rd_en),
+        .bram_a_rd_data   (bram_a_rd_data),
+        // BRAM_C (write-only)
+        .bram_c_addr      (bram_c_addr),
+        .bram_c_wr_data   (bram_c_wr_data),
+        .bram_c_wr_en     (bram_c_wr_en)
     );
 
 endmodule

@@ -1,20 +1,22 @@
 // =============================================================================
-// mem_controller.sv — Round-Robin  Memory Arbiter for Dual-Port BRAM
+// mem_controller.sv — Round-Robin Memory Arbiter for Two Separate BRAMs
 //
-// Sits between NUM_CORES cores and a single dual-port BRAM.
-// Both cores can request reads and writes in the same cycle because the
-// dispatcher starts them simultaneously. This module ensures only one
-// core drives each BRAM port at a time using round-robin arbitration.
+// Sits between NUM_CORES cores and two independent BRAMs:
+//   BRAM_A  — read-only BRAM that holds input matrices A and B
+//   BRAM_C  — write-only BRAM that holds output matrix C
 //
-// READ ARBITRATION (Port A):
+// Because reads and writes now target different physical memories, there is
+// no read/write port conflict.  The two arbiters below remain independent:
+//
+// READ ARBITRATION → BRAM_A:
 //   - A core signals it wants a read by asserting mem_read_valid.
 //   - The arbiter grants one core per cycle via mem_read_ready.
 //   - The losing core stalls (its scheduler stays in WAIT) until next cycle.
-//   - BRAM read data is broadcast to all cores; only the winning core's
+//   - BRAM_A read data is broadcast to all cores; only the winning core's
 //     scheduler advances to FMA and pulses data_valid, so only the right
 //     thread captures the data.
 //
-// WRITE ARBITRATION (Port B):
+// WRITE ARBITRATION → BRAM_C:
 //   - Same mechanism: core asserts mem_write_valid, arbiter grants via
 //     mem_write_ready, loser stalls in WRITE state for one extra cycle.
 // =============================================================================
@@ -39,15 +41,15 @@ module mem_controller #(
     input  logic [DATA_WIDTH-1:0] core_write_data  [NUM_CORES-1:0],
     output logic [NUM_CORES-1:0]  core_write_ready,
 
-    // ── BRAM Port A (read) ─────────────────────────────────────────────────
-    output logic [ADDR_WIDTH-1:0] ram_addr_a,
-    output logic                  ram_rd_en_a,
-    input  logic [DATA_WIDTH-1:0] ram_rd_data_a,
+    // ── BRAM_A — read-only (holds input matrices A & B) ───────────────────
+    output logic [ADDR_WIDTH-1:0] bram_a_addr,
+    output logic                  bram_a_rd_en,
+    input  logic [DATA_WIDTH-1:0] bram_a_rd_data,
 
-    // ── BRAM Port B (write) ────────────────────────────────────────────────
-    output logic [ADDR_WIDTH-1:0] ram_addr_b,
-    output logic [DATA_WIDTH-1:0] ram_wr_data_b,
-    output logic                  ram_wr_en_b
+    // ── BRAM_C — write-only (holds output matrix C) ───────────────────────
+    output logic [ADDR_WIDTH-1:0] bram_c_addr,
+    output logic [DATA_WIDTH-1:0] bram_c_wr_data,
+    output logic                  bram_c_wr_en
 );
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -72,7 +74,7 @@ module mem_controller #(
 
     localparam PTR_W = (NUM_CORES == 1) ? 1 : $clog2(NUM_CORES);
 
-    // ── Read arbiter ──────────────────────────────────────────────────────────
+    // ── Read arbiter → BRAM_A ─────────────────────────────────────────────
     logic [PTR_W-1:0]    read_ptr;
     logic [NUM_CORES-1:0] read_grant;
 
@@ -96,13 +98,13 @@ module mem_controller #(
     end
 
     assign core_read_ready = read_grant;
-    assign ram_rd_en_a     = |core_read_valid;
+    assign bram_a_rd_en    = |core_read_valid;
 
-    // MUX: winning core's address drives Port A
+    // MUX: winning core's address drives BRAM_A
     always_comb begin
-        ram_addr_a = '0;
+        bram_a_addr = '0;
         for (int i = 0; i < NUM_CORES; i++)
-            if (read_grant[i]) ram_addr_a = core_read_addr[i];
+            if (read_grant[i]) bram_a_addr = core_read_addr[i];
     end
 
     // Broadcast read data to all cores — safe because only the winner's
@@ -110,11 +112,11 @@ module mem_controller #(
     genvar i;
     generate
         for (i = 0; i < NUM_CORES; i++) begin : gen_read_data
-            assign core_read_data[i] = ram_rd_data_a;
+            assign core_read_data[i] = bram_a_rd_data;
         end
     endgenerate
 
-    // ── Write arbiter ─────────────────────────────────────────────────────────
+    // ── Write arbiter → BRAM_C ────────────────────────────────────────────
     logic [PTR_W-1:0]    write_ptr;
     logic [NUM_CORES-1:0] write_grant;
 
@@ -136,15 +138,15 @@ module mem_controller #(
     end
 
     assign core_write_ready = write_grant;
-    assign ram_wr_en_b      = |core_write_valid;
+    assign bram_c_wr_en     = |core_write_valid;
 
     always_comb begin
-        ram_addr_b    = '0;
-        ram_wr_data_b = '0;
+        bram_c_addr    = '0;
+        bram_c_wr_data = '0;
         for (int i = 0; i < NUM_CORES; i++) begin
             if (write_grant[i]) begin
-                ram_addr_b    = core_write_addr[i];
-                ram_wr_data_b = core_write_data[i];
+                bram_c_addr    = core_write_addr[i];
+                bram_c_wr_data = core_write_data[i];
             end
         end
     end
