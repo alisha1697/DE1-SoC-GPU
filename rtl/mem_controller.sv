@@ -78,7 +78,9 @@ module mem_controller #(
     logic [PTR_W-1:0]    read_ptr;
     logic [NUM_CORES-1:0] read_grant;
 
+
     // Combinational: scan from read_ptr, grant the first requesting core found
+    // Circular Buffer
     always_comb begin
         read_grant = '0;
         for (int i = 0; i < NUM_CORES; i++) begin

@@ -1,0 +1,33 @@
+-- Test .mif for mem_controller_tb
+-- A[i] = i * 2  (so reads are easy to verify: read addr 0x05 → get 0x000A)
+
+WIDTH=16;
+DEPTH=256;
+
+ADDRESS_RADIX=UNS;
+DATA_RADIX=HEX;
+
+CONTENT BEGIN
+    0   : 0000;
+    1   : 0002;
+    2   : 0004;
+    3   : 0006;
+    4   : 0008;
+    5   : 000A;
+    6   : 000C;
+    7   : 000E;
+    8   : 0010;
+    9   : 0012;
+    10  : 0014;
+    11  : 0016;
+    12  : 0018;
+    13  : 001A;
+    14  : 001C;
+    15  : 001E;
+    16  : 0020;
+    17  : 0022;
+    18  : 0024;
+    19  : 0026;
+    20  : 0028;
+    [21..255] : 0000;
+END;
