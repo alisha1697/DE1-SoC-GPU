@@ -3,24 +3,25 @@
 // =============================================================================
 // scheduler_tb.sv
 //
-// Self-checking testbench for scheduler.sv (handshake-based interface).
+// Self-checking testbench for rtl/scheduler.sv (fixed BRAM latency, no handshake).
 //
-// The scheduler now uses valid/ready handshakes with mem_controller:
-//   - mem_read_valid / mem_read_ready  : read request to BRAM_A arbiter
-//   - mem_write_valid / mem_write_ready : write request to BRAM_C arbiter
-//
-// Because this testbench exercises a single scheduler (no arbitration
-// contention), we tie the ready signals to their corresponding valid signals
-// to simulate an always-available arbiter (grant on the same cycle as request).
+// Tests:
+//   1. Single block:        N=3, thread_count=2
+//   2. Multi-block re-entry from DONE (no reset)
+//   3. Partial block:       N=3, thread_count=1  (only one thread active)
+//   4. Edge case N=1:       N=1, thread_count=1
+//   5. BRAM_LATENCY=2:      separate DUT instance, verifies extra WAIT cycles
 // =============================================================================
 
 module scheduler_tb;
 
-    // Parameters
-    parameter THREADS_PER_CORE = 2;
-    parameter TSEL = (THREADS_PER_CORE == 1) ? 1 : $clog2(THREADS_PER_CORE);
+    localparam THREADS_PER_CORE = 2;
+    localparam BRAM_LATENCY     = 1;
+    localparam TSEL             = (THREADS_PER_CORE == 1) ? 1 : $clog2(THREADS_PER_CORE);
 
-    // Testbench signals
+    localparam [3:0] ST_WAIT = 4'b0010;
+    localparam [3:0] ST_FMA  = 4'b0011;
+
     logic clk;
     logic rst;
     logic start;
@@ -31,122 +32,139 @@ module scheduler_tb;
     logic [THREADS_PER_CORE-1:0] data_valid;
     logic [THREADS_PER_CORE-1:0] fma_en;
     logic [7:0]                  k;
+    logic                        mem_write_en;
+    logic                        kernel_init;
     logic [3:0]                  fsm_state;
     logic                        done;
 
-    // Handshake signals (replacing the old mem_write_en)
-    logic mem_read_valid;
-    logic mem_read_ready;
-    logic mem_write_valid;
-    logic mem_write_ready;
-
-    // Self-checking counters / expected values
     int fma_count;
     int write_count;
+    int kernel_init_count;
     int expected_t;
     int expected_k;
+    int errors;
 
-    // Instantiate the scheduler
+    // Second instance for BRAM_LATENCY > 1 (compile-time parameter)
+    localparam BRAM_LATENCY2 = 2;
+
+    logic                        rst_lat2;
+    logic                        start_lat2;
+    logic [7:0]                  N_lat2;
+    logic [7:0]                  thread_count_lat2;
+    logic [TSEL-1:0]             t_select_lat2;
+    logic [THREADS_PER_CORE-1:0] data_valid_lat2;
+    logic [THREADS_PER_CORE-1:0] fma_en_lat2;
+    logic [7:0]                  k_lat2;
+    logic                        mem_write_en_lat2;
+    logic                        kernel_init_lat2;
+    logic [3:0]                  fsm_state_lat2;
+    logic                        done_lat2;
+
+    int fma_count_lat2;
+    int write_count_lat2;
+    int kernel_init_count_lat2;
+    int expected_t_lat2;
+    int expected_k_lat2;
+    int wait_cycles_lat2;
+    int wait_run_lat2;
+    logic [3:0] prev_state_lat2;
+
     scheduler #(
-        .THREADS_PER_CORE(THREADS_PER_CORE)
+        .THREADS_PER_CORE (THREADS_PER_CORE),
+        .BRAM_LATENCY     (BRAM_LATENCY)
     ) dut (
-        .clk             (clk),
-        .rst             (rst),
-        .start           (start),
-        .N               (N),
-        .thread_count    (thread_count),
-        .t_select        (t_select),
-        .data_valid      (data_valid),
-        .fma_en          (fma_en),
-        .k               (k),
-        .mem_read_valid  (mem_read_valid),
-        .mem_read_ready  (mem_read_ready),
-        .mem_write_valid (mem_write_valid),
-        .mem_write_ready (mem_write_ready),
-        .state           (fsm_state),
-        .done            (done)
+        .clk          (clk),
+        .rst          (rst),
+        .start        (start),
+        .N            (N),
+        .thread_count (thread_count),
+        .t_select     (t_select),
+        .data_valid   (data_valid),
+        .fma_en       (fma_en),
+        .k            (k),
+        .mem_write_en (mem_write_en),
+        .kernel_init  (kernel_init),
+        .state        (fsm_state),
+        .done         (done)
     );
 
-    // Simulate an always-available arbiter: grant immediately on request.
-    // With a single scheduler there is never contention, so this is correct.
-    assign mem_read_ready  = mem_read_valid;
-    assign mem_write_ready = mem_write_valid;
+    scheduler #(
+        .THREADS_PER_CORE (THREADS_PER_CORE),
+        .BRAM_LATENCY     (BRAM_LATENCY2)
+    ) dut_lat2 (
+        .clk          (clk),
+        .rst          (rst_lat2),
+        .start        (start_lat2),
+        .N            (N_lat2),
+        .thread_count (thread_count_lat2),
+        .t_select     (t_select_lat2),
+        .data_valid   (data_valid_lat2),
+        .fma_en       (fma_en_lat2),
+        .k            (k_lat2),
+        .mem_write_en (mem_write_en_lat2),
+        .kernel_init  (kernel_init_lat2),
+        .state        (fsm_state_lat2),
+        .done         (done_lat2)
+    );
 
-    // Clock generation: 10 ns period
     always #5 clk = ~clk;
 
-    initial begin
-        // Initialize signals
-        clk          = 0;
-        rst          = 1;
-        start        = 0;
+    task automatic reset_counters;
+        fma_count         = 0;
+        write_count       = 0;
+        kernel_init_count = 0;
+        expected_t        = 0;
+        expected_k        = 0;
+    endtask
 
-        N            = 8'd3;
-        thread_count = 8'd2;
+    task automatic reset_counters_lat2;
+        fma_count_lat2         = 0;
+        write_count_lat2       = 0;
+        kernel_init_count_lat2 = 0;
+        expected_t_lat2        = 0;
+        expected_k_lat2        = 0;
+        wait_cycles_lat2       = 0;
+        wait_run_lat2          = 0;
+        prev_state_lat2        = ST_WAIT;
+    endtask
 
-        fma_count    = 0;
-        write_count  = 0;
-        expected_t   = 0;
-        expected_k   = 0;
-
-        // Hold reset for 2 clock cycles
-        repeat (2) @(posedge clk);
-        rst = 0;
-
-        // Pulse start for 1 clock cycle
+    task automatic pulse_start;
         @(posedge clk);
         start = 1;
-
         @(posedge clk);
         start = 0;
+    endtask
 
-        // Wait for scheduler to finish
-        wait(done);
+    task automatic pulse_start_lat2;
+        @(posedge clk);
+        start_lat2 = 1;
+        @(posedge clk);
+        start_lat2 = 0;
+    endtask
 
-        // Final checks after done
-        assert(fma_count == N * thread_count)
-        else $error("Wrong number of FMA pulses. Expected %0d, got %0d",
-                    N * thread_count, fma_count);
-
-        assert(write_count == thread_count)
-        else $error("Wrong number of writes. Expected %0d, got %0d",
-                    thread_count, write_count);
-
-        if ((fma_count == N * thread_count) && (write_count == thread_count))
-            $display("PASS: scheduler test passed");
-
-        $finish;
-    end
-
-    // Monitor/check DUT behaviour every clock
+    // Monitor primary DUT
     always @(posedge clk) begin
         if (!rst) begin
+            if (kernel_init)
+                kernel_init_count++;
 
-            // Check FMA event
             if (fma_en != '0) begin
+                if (fma_en !== data_valid)
+                    $error("fma_en and data_valid mismatch. fma_en=%b data_valid=%b",
+                           fma_en, data_valid);
 
-                assert(fma_en == data_valid)
-                else $error("fma_en and data_valid mismatch. fma_en=%b data_valid=%b",
-                            fma_en, data_valid);
+                if (t_select != expected_t[TSEL-1:0])
+                    $error("Expected thread %0d, got %0d", expected_t, t_select);
 
-                assert(t_select == expected_t[TSEL-1:0])
-                else $error("Expected thread %0d, got %0d",
-                            expected_t, t_select);
+                if (k != expected_k[7:0])
+                    $error("Expected k %0d, got %0d", expected_k, k);
 
-                assert(k == expected_k[7:0])
-                else $error("Expected k %0d, got %0d",
-                            expected_k, k);
-
-                assert(fma_en[t_select] == 1'b1)
-                else $error("Selected thread did not get fma_en");
-
-                assert(data_valid[t_select] == 1'b1)
-                else $error("Selected thread did not get data_valid");
+                if (!fma_en[t_select] || !data_valid[t_select])
+                    $error("Selected thread did not get fma_en/data_valid");
 
                 fma_count++;
 
-                // Advance expected thread/k model
-                if (expected_t == thread_count - 1) begin
+                if (expected_t == int'(thread_count) - 1) begin
                     expected_t = 0;
                     expected_k++;
                 end else begin
@@ -154,16 +172,177 @@ module scheduler_tb;
                 end
             end
 
-            // Count write grants: a write is accepted when mem_write_valid
-            // and mem_write_ready are both high in the same cycle.
-            if (mem_write_valid && mem_write_ready) begin
+            if (mem_write_en)
                 write_count++;
+
+            if (mem_write_en && (fma_en != '0))
+                $error("mem_write_en and fma_en were high in the same cycle");
+        end
+    end
+
+    // Monitor latency-2 DUT (includes WAIT-cycle stretch check)
+    always @(posedge clk) begin
+        if (!rst_lat2) begin
+            if (kernel_init_lat2)
+                kernel_init_count_lat2++;
+
+            if (fsm_state_lat2 == ST_WAIT)
+                wait_run_lat2++;
+
+            if (prev_state_lat2 == ST_WAIT && fsm_state_lat2 == ST_FMA) begin
+                if (wait_run_lat2 != BRAM_LATENCY2) begin
+                    $error("BRAM_LATENCY=2: expected %0d WAIT cycles, got %0d",
+                           BRAM_LATENCY2, wait_run_lat2);
+                    errors++;
+                end
+                wait_cycles_lat2 += wait_run_lat2;
+                wait_run_lat2 = 0;
             end
 
-            // FMA and write should not happen in the same cycle
-            assert(!(mem_write_valid && mem_write_ready && (fma_en != '0)))
-            else $error("Write grant and fma_en were high in the same cycle");
+            if (fsm_state_lat2 != ST_WAIT)
+                wait_run_lat2 = 0;
+
+            prev_state_lat2 = fsm_state_lat2;
+
+            if (fma_en_lat2 != '0) begin
+                if (t_select_lat2 != expected_t_lat2[TSEL-1:0])
+                    $error("[lat2] Expected thread %0d, got %0d", expected_t_lat2, t_select_lat2);
+
+                if (k_lat2 != expected_k_lat2[7:0])
+                    $error("[lat2] Expected k %0d, got %0d", expected_k_lat2, k_lat2);
+
+                fma_count_lat2++;
+
+                if (expected_t_lat2 == int'(thread_count_lat2) - 1) begin
+                    expected_t_lat2 = 0;
+                    expected_k_lat2++;
+                end else begin
+                    expected_t_lat2++;
+                end
+            end
+
+            if (mem_write_en_lat2)
+                write_count_lat2++;
         end
+    end
+
+    task automatic check_block_counts(
+        input string label,
+        input int    test_N,
+        input int    test_tc,
+        input int    expect_kernel_init
+    );
+        if (fma_count != test_N * test_tc) begin
+            $error("%s: wrong FMA count. Expected %0d, got %0d",
+                   label, test_N * test_tc, fma_count);
+            errors++;
+        end
+
+        if (write_count != test_tc) begin
+            $error("%s: wrong write count. Expected %0d, got %0d",
+                   label, test_tc, write_count);
+            errors++;
+        end
+
+        if (kernel_init_count != expect_kernel_init) begin
+            $error("%s: wrong kernel_init count. Expected %0d, got %0d",
+                   label, expect_kernel_init, kernel_init_count);
+            errors++;
+        end
+    endtask
+
+    task automatic check_block_counts_lat2(
+        input string label,
+        input int    test_N,
+        input int    test_tc,
+        input int    expect_kernel_init
+    );
+        if (fma_count_lat2 != test_N * test_tc) begin
+            $error("%s: wrong FMA count. Expected %0d, got %0d",
+                   label, test_N * test_tc, fma_count_lat2);
+            errors++;
+        end
+
+        if (write_count_lat2 != test_tc) begin
+            $error("%s: wrong write count. Expected %0d, got %0d",
+                   label, test_tc, write_count_lat2);
+            errors++;
+        end
+
+        if (kernel_init_count_lat2 != expect_kernel_init) begin
+            $error("%s: wrong kernel_init count. Expected %0d, got %0d",
+                   label, expect_kernel_init, kernel_init_count_lat2);
+            errors++;
+        end
+
+        if (wait_cycles_lat2 != (test_N * test_tc * BRAM_LATENCY2)) begin
+            $error("%s: wrong total WAIT cycles. Expected %0d, got %0d",
+                   label, test_N * test_tc * BRAM_LATENCY2, wait_cycles_lat2);
+            errors++;
+        end
+    endtask
+
+    task automatic run_kernel(
+        input string label,
+        input int    test_N,
+        input int    test_tc,
+        input int    expect_kernel_init
+    );
+        N            = test_N[7:0];
+        thread_count = test_tc[7:0];
+        reset_counters;
+        pulse_start;
+        wait (done);
+        @(posedge clk);
+        check_block_counts(label, test_N, test_tc, expect_kernel_init);
+    endtask
+
+    initial begin
+        clk          = 0;
+        rst          = 1;
+        start        = 0;
+        N            = 8'd3;
+        thread_count = 8'd2;
+        errors       = 0;
+
+        rst_lat2          = 1;
+        start_lat2        = 0;
+        N_lat2            = 8'd2;
+        thread_count_lat2 = 8'd2;
+
+        reset_counters;
+        reset_counters_lat2;
+
+        repeat (2) @(posedge clk);
+        rst = 0;
+
+        // Test 1: single block
+        run_kernel("single block", 3, 2, 1);
+
+        // Test 2: multi-block re-entry from DONE (no reset)
+        run_kernel("multi-block re-entry", 3, 2, 1);
+
+        // Test 3: partial block — only 1 of 2 hardware threads used
+        run_kernel("partial block (thread_count=1)", 3, 1, 1);
+
+        // Test 4: N=1 edge case — single FMA, single write
+        run_kernel("N=1 edge case", 1, 1, 1);
+
+        // Test 5: BRAM_LATENCY=2 on separate DUT instance
+        rst_lat2 = 0;
+        @(posedge clk);
+        reset_counters_lat2;
+        pulse_start_lat2;
+        wait (done_lat2);
+        @(posedge clk);
+        check_block_counts_lat2("BRAM_LATENCY=2", 2, 2, 1);
+
+        if (errors == 0)
+            $display("PASS: scheduler test passed (5 cases)");
+        else
+            $error("FAIL: scheduler test failed with %0d errors", errors);
+
+        $finish;
     end
 
 endmodule
