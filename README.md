@@ -1,75 +1,194 @@
 # DE1-SoC-GPU
 
-## Top Level Structure Version 1
+A 2-core SIMT GPU written in SystemVerilog, targeting the Terasic DE1-SoC FPGA
+(Cyclone V). Executes parameterised NxN integer matrix multiply across multiple
+hardware threads, with a dispatcher that hands out work blocks to free cores
+as they become available.
 
-## Design
+The project is built from scratch for educational and portfolio purposes; it
+does not depend on any vendor GPU IP. All RTL is hand-written and verified
+in ModelSim ASE.
 
-- Data width: 16-bit, Address width: 16-bit (both as parameters)
-- Default: `NUM_CORES = 2`, `THREADS_PER_CORE = 2` as sim
+---
 
-## Handshake Protocol: Valid/Ready
+## Architecture overview
 
-All data transfers between modules use valid/ready:
+```
+                                +--------------+
+                                |  dispatcher  |
+                                +------+-------+
+                                       | core_valid / core_start
+                                       | thread_id_start, thread_count
+                  +--------------------+--------------------+
+                  v                                         v
+            +-----------+                            +-----------+
+            |  core 0   |                            |  core 1   |
+            | +-------+ |                            | +-------+ |
+            | |sched- | |                            | |sched- | |
+            | | uler  | |                            | | uler  | |
+            | +-------+ |                            | +-------+ |
+            | thread x N|                            | thread x N|
+            | (each has |                            | (each has |
+            |  one FMA) |                            |  one FMA) |
+            +--+--+--+--+                            +--+--+--+--+
+               |  |  |                                  |  |  |
+               A  B  C  (per-core BRAM ports)           A  B  C
+               v  v  v                                  v  v  v
+            +--------------------- gpu_top.sv ---------------------+
+            |   Per-core split A/B/C memory ports exposed at top   |
+            +------------------------------------------------------+
+```
 
-- Producer asserts `valid` when data is available on the bus
-- Consumer asserts `ready` when it can accept data
-- Transfer occurs when both `valid` and `ready` are high on the same clock cyc
+The current configuration is `NUM_CORES = 2`, `THREADS_PER_CORE = 2`. Each
+core has its own A read, B read and C write port. There is no shared memory
+arbiter at this stage; the testbench models per-core dual-port BRAMs that all
+back onto a shared `mem_A` / `mem_B` / `mem_C` array for verification.
 
-Applied to:
+### Execution model
 
-- dispatcher -> core: `core_valid` / `core_ready` for thread assignment data
-- core -> scheduler: `sched_valid` / `sched_ready` for memory read data
-- scheduler -> threads: `thread_valid` / `thread_ready` for load data to threads
-- core -> gpu_top : `mem_read_valid`/`mem_read_ready`, `mem_write_valid`/`mem_write_ready`
+Work is partitioned at two levels:
 
-## BRAM
+1. The dispatcher slices the `N*N` output elements into blocks of
+   `THREADS_PER_CORE` and hands one block to each free core via a
+   valid / ready handshake plus a one-cycle `core_start` pulse.
+2. Inside a core, the scheduler walks the inner product loop
+   `for k = 0..N-1`, driving each thread's address generation and FMA in
+   turn. After the last `k` it drives the per-thread `WRITE` phase that
+   stores the accumulated result back to BRAM.
 
-The external RAM is a dual port BRAM instantiated in Quartus. `gpu_top` has these ports that connect to the RAM IP. Allows simultaneous r/w on the same clk cyc. 
+A `kernel_init` signal pulses for one cycle every time the scheduler enters
+its `INIT` state. Threads use it as a synchronous reset for their
+accumulator, so a hardware thread instance that is reused across multiple
+block dispatches starts each kernel cleanly.
 
-- Port A (read): `ram_addr_a`, `ram_rd_en_a`, `ram_rd_data_a`
-- Port B (write): `ram_addr_b`, `ram_wr_en_b`, `ram_wr_data_b`
+---
 
-## Initial Design - 6 Modules
+## Module breakdown
 
-### 1. `gpu_top.sv` -- Top-level module
+| File | Lines | Role |
+|---|---:|---|
+| `rtl/gpu_top.sv`     |  94 | Top level. Instantiates dispatcher and N cores. Exposes per-core BRAM ports. |
+| `rtl/dispatcher.sv`  | 158 | Greedy block dispatcher with a priority-encoder picking the lowest-index free core each cycle. |
+| `rtl/core.sv`        | 160 | Per-core wrapper. Owns the scheduler, the thread instances and the address MUXes. |
+| `rtl/scheduler.sv`   | 161 | Kernel FSM: IDLE -> INIT -> WAIT -> FMA -> NEXT_T/NEXT_K -> WRITE -> NEXT_W -> DONE. |
+| `rtl/thread.sv`      |  75 | One output element. Address generation + accumulator + one FMA. |
+| `rtl/fma.sv`         |  27 | Integer fused multiply-add: `result = a*b + c`. |
+| `rtl/mem_controller.sv` | 152 | Round-robin memory arbiter (not currently wired into `gpu_top`; reserved for shared-memory scaling). |
+| `rtl/gpu_mem_master.sv` |  36 | Avalon-MM master stub for future SDRAM integration. |
 
-- **Params**: `DATA_WIDTH`, `ADDR_WIDTH`, `NUM_CORES`, `THREADS_PER_CORE`
-- **Inputs**: `clk`, `rst`, `start`, `N[7:0]`, `base_addr_A/B/C[ADDR_WIDTH-1:0]`
-- **RAM Port A (r)**: output `ram_addr_a[ADDR_WIDTH-1:0]`,  `ram_rd_en_a`, input `ram_rd_data_a[DATA_WIDTH-1:0]`
-- **RAM Port B (w)**: output `ram_addr_b[ADDR_WIDTH-1:0]`,  `ram_wr_en_b`, output `ram_wr_data_b[DATA_WIDTH-1:0]`
-- **Outputs**: `done` to external
+### Parameters
 
-### 2. `dispatcher.sv` -- Splits N^2 threads across cores, assigns thread IDs and counts
+All sizes are parameterised on every module so the same RTL can scale to
+larger configurations without source edits.
 
-- **Params**: `NUM_CORES`, `THREADS_PER_CORE`
-- **Inputs**: `clk`, `rst`, `start`, `N[7:0]`, `core_done[NUM_CORES-1:0]`, `core_ready[NUM_CORES-1:0]`
-- **Outputs**: `core_valid[NUM_CORES-1:0]`, `core_start[NUM_CORES-1:0]`, `core_thread_id_start[NUM_CORES-1:0][15:0]`, `core_thread_count[NUM_CORES-1:0][15:0]`, `done`
+| Parameter | Default | Meaning |
+|---|---:|---|
+| `DATA_WIDTH` | 16 | Width of A, B, C elements. |
+| `ADDR_WIDTH` | 16 | Width of memory addresses. |
+| `NUM_CORES`  |  2 | Number of compute cores instantiated. |
+| `THREADS_PER_CORE` | 2 | Threads per core (block size). |
 
-### 3. `core.sv` -- Executes a block of threads with shared scheduler and memory bus
+---
 
-- **Params**: `DATA_WIDTH`, `ADDR_WIDTH`, `THREADS_PER_CORE`
-- **Inputs**: `clk`, `rst`, `start`, `dispatch_valid`, `thread_id_start[15:0]`, `thread_count[15:0]`, `base_addr_A/B/C[ADDR_WIDTH-1:0]`, `N[7:0]`
-- **Outputs**: `dispatch_ready`, `done`
-- **Memory read bus**: output `mem_read_valid`,  `mem_read_addr[ADDR_WIDTH-1:0]`, input `mem_read_ready`,  `mem_read_data[DATA_WIDTH-1:0]`
-- **Memory write bus**: output `mem_write_valid`,  `mem_write_addr[ADDR_WIDTH-1:0]`,  `mem_write_data[DATA_WIDTH-1:0]`, input `mem_write_ready`
+## Repository layout
 
-### 4. `scheduler.sv` -- Main FSM
+```
+DE1-SoC-GPU/
+|- rtl/                  Canonical synthesisable SystemVerilog. Source of truth.
+|- tb/                   ModelSim testbenches organised by module under test.
+|  |- Top/               System-level testbench (gpu_top_tb.sv) - the main one.
+|  |- core/              Unit-level testbench for a single core.
+|  |- dispatcher/        ...
+|  |- fma/               ...
+|  |- scheduler/         ...
+|  |- thread/            ...
+|- src/tb/Top/           ModelSim project working directory. Loads from src/tb/Top/rtl/.
+|  |- rtl/               WORKING COPY of rtl/ - kept in sync manually.
+|- DE1-Soc/              Quartus project (DE1_SoC_Default.qpf and friends).
+|- SDRAM/                SDRAM controller IP scaffolding (work-in-progress).
+```
 
- (IDLE->INIT->LOAD<->COMPUTE->WRITE->DONE)
+> Note: the duplicate `src/tb/Top/rtl/` exists because the ModelSim project's
+> compile paths point there. Any change to `rtl/` must be mirrored. Eliminating
+> this duplication is on the short-term cleanup list.
 
-- **Params**: `DATA_WIDTH`, `ADDR_WIDTH`, `THREADS_PER_CORE`
-- **Inputs**: `clk`, `rst`, `start`, `N[7:0]`, `thread_count[15:0]`, `mem_read_ready`, `mem_read_data[DATA_WIDTH-1:0]`, `mem_write_ready`
-- **Outputs**: `k[7:0]`, `thread_valid`, `fma_en`, `state[2:0]`, `mem_read_valid`, `mem_read_addr[ADDR_WIDTH-1:0]`, `mem_write_valid`, `mem_write_addr[ADDR_WIDTH-1:0]`, `mem_write_data[DATA_WIDTH-1:0]`, `done`
-- **Thread data handshake**: output `thread_valid`, input `thread_ready`
+---
 
-### 5. `thread.sv` -- Computes one C[i][j] element using index/address generation and FMA
+## Building and running
 
-- **Params**: `DATA_WIDTH`, `ADDR_WIDTH`
-- **Inputs**: `clk`, `rst`, `thread_id[15:0]`, `base_addr_A/B/C[ADDR_WIDTH-1:0]`, `N[7:0]`, `k[7:0]`, `en`, `data_valid`, `a_val[DATA_WIDTH-1:0]`, `b_val[DATA_WIDTH-1:0]`, `fma_result[DATA_WIDTH-1:0]`
-- **Outputs**: `data_ready`, `addr_A/B/C[ADDR_WIDTH-1:0]`, `fma_a[DATA_WIDTH-1:0]`, `fma_b[DATA_WIDTH-1:0]`, `result[DATA_WIDTH-1:0]`
+### Simulation (ModelSim ASE)
 
-### 6. `fma.sv` -- Fused multiply-add unit: computes (a * b) + c
+The system-level testbench at `tb/Top/gpu_top_tb.sv` exercises the full
+pipeline end-to-end on a 4x4 matmul. It models per-core BRAMs, sources
+inputs, monitors C writes, and checks against a software golden reference.
 
-- **Params**: `DATA_WIDTH`
-- **Inputs**: `clk`, `rst`, `a[DATA_WIDTH-1:0]`, `b[DATA_WIDTH-1:0]`, `c[DATA_WIDTH-1:0]`, `valid_in`
-- **Outputs**: `result[DATA_WIDTH-1:0]`, `valid_out`, `ready`
+From a ModelSim shell in `src/tb/Top/`:
+
+```
+vlib work
+vlog -sv rtl/*.sv gpu_top_tb.sv
+vsim -gui work.gpu_top_tb
+run -all
+```
+
+A passing run prints:
+
+```
+=== GPU SYSTEM TEST: 4x4 matmul (NUM_CORES=2, T/C=2) ===
+  ...
+  PASS  C[0][0] = 90
+  PASS  C[0][1] = 100
+  ...
+=== SYSTEM TEST PASSED ===
+```
+
+Per-module unit tests live under `tb/<module>/<module>_tb.sv` and can be run
+the same way.
+
+### Hardware (Quartus, DE1-SoC)
+
+The Quartus project lives under `DE1-Soc/`. Open `DE1_SoC_Default.qpf`,
+ensure the `rtl/*.sv` files are in the file set, set the top entity, and
+run Compile. Hardware bring-up (push-button start, LED done indicator, HEX
+display readback) is in progress and tracked separately.
+
+---
+
+## Verification status
+
+| Test | Status | Notes |
+|---|---|---|
+| `fma_tb`        | passing | Directed cases for sign / overflow corners. |
+| `thread_tb`     | passing | Address gen and accumulator. |
+| `scheduler_tb`  | passing | FSM coverage including DONE re-entry. |
+| `dispatcher_tb` | passing | Single-core and multi-core dispatch ordering. |
+| `core_tb`       | passing | Two-thread block end-to-end. |
+| `gpu_top_tb`    | passing | 4x4 system-level matmul, exercises 8-block dispatch and `kernel_init` reset. |
+
+Verification is directed-test based, written in synthesisable-subset
+SystemVerilog so it runs in ModelSim ASE (which does not support SVA,
+randomisation, coverage, or class-based constructs).
+
+---
+
+## Known limitations
+
+- Integer only. No floating point or fp16.
+- Fixed scheduling. No real ISA yet - the scheduler hardcodes the matmul
+  loop structure. A small load/store/FMA/branch ISA with an instruction
+  ROM is the next major addition; that turns this from a matmul
+  accelerator into a programmable GPU.
+- Per-core BRAM ports. The `mem_controller.sv` round-robin arbiter exists
+  but is not yet wired into `gpu_top`. Shared memory arrives with the
+  next architecture revision.
+- No DRAM. SDRAM controller IP is scaffolded under `SDRAM/` but the GPU
+  currently runs entirely against on-chip BRAM.
+
+---
+
+## Authors
+
+Project work by Pouya Hatami (UBC ECE) and contributors. Originally forked
+from an early Adam-Maraj-inspired exploration; the dispatcher, scheduler,
+thread, FMA, memory subsystem and verification environment in this repo
+are an independent re-implementation.

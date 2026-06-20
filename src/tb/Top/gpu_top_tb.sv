@@ -9,52 +9,39 @@ module gpu_top_tb;
     localparam ADDR_WIDTH       = 16;
     localparam NUM_CORES        = 2;
     localparam THREADS_PER_CORE = 2;
-    localparam N_TEST           = 2;     // 2x2 matmul
+    // 4x4 = 16 threads, 2 threads/core -> 8 blocks, 4 dispatches per core.
+    // This is the first config that actually exercises the kernel_init path
+    // (each hardware thread instance is reused across multiple block dispatches).
+    localparam N_TEST           = 4;
 
-    // ─── DUT-facing signals ─────────────────────────────
     logic                       clk, rst;
     logic                       start;
     logic [7:0]                 N;
     logic [ADDR_WIDTH-1:0]      base_addr_A, base_addr_B, base_addr_C;
     logic                       done;
 
-    // BRAM_A read port (from DUT)
-    logic [DATA_WIDTH-1:0]      bram_a_rd_data;
-    logic [ADDR_WIDTH-1:0]      bram_a_addr;
-    logic                       bram_a_rd_en;
+    logic [ADDR_WIDTH-1:0]      bram_a_addr    [NUM_CORES-1:0];
+    logic [DATA_WIDTH-1:0]      bram_a_rd_data [NUM_CORES-1:0];
+    logic [ADDR_WIDTH-1:0]      bram_b_addr    [NUM_CORES-1:0];
+    logic [DATA_WIDTH-1:0]      bram_b_rd_data [NUM_CORES-1:0];
+    logic [ADDR_WIDTH-1:0]      bram_c_addr    [NUM_CORES-1:0];
+    logic [DATA_WIDTH-1:0]      bram_c_wr_data [NUM_CORES-1:0];
+    logic [NUM_CORES-1:0]       bram_c_wr_en;
 
-    // BRAM_C write port (from DUT)
-    logic                       bram_c_wr_en;
-    logic [ADDR_WIDTH-1:0]      bram_c_addr;
-    logic [DATA_WIDTH-1:0]      bram_c_wr_data;
+    initial begin clk = 0; forever #5 clk = ~clk; end
 
-    // ─── Clock ──────────────────────────────────────────
-    initial begin
-        clk = 0;
-        forever #5 clk = ~clk;     // 100 MHz
-    end
-
-    // ─── DUT instance ───────────────────────────────────
     gpu_top #(
         .DATA_WIDTH       (DATA_WIDTH),
         .ADDR_WIDTH       (ADDR_WIDTH),
         .NUM_CORES        (NUM_CORES),
         .THREADS_PER_CORE (THREADS_PER_CORE)
     ) dut (
-        .clk            (clk),
-        .rst            (rst),
-        .start          (start),
-        .N              (N),
-        .base_addr_A    (base_addr_A),
-        .base_addr_B    (base_addr_B),
-        .base_addr_C    (base_addr_C),
-        .bram_a_rd_data (bram_a_rd_data),
-        .bram_a_addr    (bram_a_addr),
-        .bram_a_rd_en   (bram_a_rd_en),
-        .bram_c_wr_en   (bram_c_wr_en),
-        .bram_c_addr    (bram_c_addr),
-        .bram_c_wr_data (bram_c_wr_data),
-        .done           (done)
+        .clk(clk), .rst(rst), .start(start), .N(N),
+        .base_addr_A(base_addr_A), .base_addr_B(base_addr_B), .base_addr_C(base_addr_C),
+        .bram_a_addr(bram_a_addr), .bram_a_rd_data(bram_a_rd_data),
+        .bram_b_addr(bram_b_addr), .bram_b_rd_data(bram_b_rd_data),
+        .bram_c_addr(bram_c_addr), .bram_c_wr_data(bram_c_wr_data), .bram_c_wr_en(bram_c_wr_en),
+        .done(done)
     );
 
     // Shared memory model — per-core ports, but same underlying arrays
@@ -77,24 +64,24 @@ module gpu_top_tb;
     int errors          = 0;
     int writes_observed = 0;
 
-    // ─── Background monitor for C writes ───────────────
     initial begin
         fork
             forever begin
                 @(posedge clk);
-                if (!rst && bram_c_wr_en) begin
-                    writes_observed++;
-                    $display("  [t=%0t] BRAM_C[%0d] <= %0d (write #%0d)",
-                             $time, bram_c_addr, bram_c_wr_data, writes_observed);
+                if (!rst) begin
+                    for (int c = 0; c < NUM_CORES; c++) begin
+                        if (bram_c_wr_en[c]) begin
+                            writes_observed++;
+                            $display("  [t=%0t] core%0d -> mem_C[%0d] <= %0d (write #%0d)",
+                                     $time, c, bram_c_addr[c], bram_c_wr_data[c], writes_observed);
+                        end
+                    end
                 end
             end
         join_none
     end
 
-    // ─── Golden reference ──────────────────────────────
-    function automatic logic [DATA_WIDTH-1:0] compute_golden(
-        input int row, col, NN, base_a, base_b
-    );
+    function automatic logic [DATA_WIDTH-1:0] compute_golden(input int row, col, NN);
         logic [DATA_WIDTH-1:0] acc = 0;
         for (int kk = 0; kk < NN; kk++)
             acc += mem_A[row*NN + kk] * mem_B[kk*NN + col];
@@ -102,24 +89,25 @@ module gpu_top_tb;
     endfunction
 
     initial begin
-        for (int i = 0; i < 256; i++) mem_A[i] = 0;
-        for (int i = 0; i < 256; i++) mem_C[i] = 16'hDEAD;  // poison so we see fresh writes
-
-        // A matrix (row-major)
-        mem_A[0] = 16'd1;  mem_A[1] = 16'd2;
-        mem_A[2] = 16'd3;  mem_A[3] = 16'd4;
-
-        // B matrix (row-major), placed right after A
-        mem_A[4] = 16'd5;  mem_A[5] = 16'd6;
-        mem_A[6] = 16'd7;  mem_A[7] = 16'd8;
+        for (int i = 0; i < 256; i++) begin
+            mem_A[i] = 0;
+            mem_B[i] = 0;
+            mem_C[i] = 16'hDEAD;
+        end
+        // Fill A and B (NxN, row-major) with sequential values 1..N*N.
+        // For N=4: A = B = [[1,2,3,4],[5,6,7,8],[9,10,11,12],[13,14,15,16]]
+        // Max product = 16*16 = 256; max accumulator = 4 * 256 = 1024 — well
+        // within 16-bit range, so no overflow concerns at this size.
+        for (int i = 0; i < N_TEST*N_TEST; i++) begin
+            mem_A[i] = 16'(i + 1);
+            mem_B[i] = 16'(i + 1);
+        end
     end
 
-    // ─── Main test ─────────────────────────────────────
     initial begin
         $dumpfile("gpu_top_tb.vcd");
         $dumpvars(0, gpu_top_tb);
 
-        // Initial state
         rst         = 1;
         start       = 0;
         N           = N_TEST[7:0];
@@ -141,18 +129,14 @@ module gpu_top_tb;
         end
         $display("");
 
-        // Hold reset for a few cycles
         repeat (3) @(posedge clk);
         rst = 0;
         @(posedge clk);
 
-        // Pulse start
-        $display("[t=%0t] Pulsing start ...", $time);
         start = 1;
         @(posedge clk);
         start = 0;
 
-        // Wait for done with a timeout
         fork
             begin
                 wait (done);
@@ -160,60 +144,12 @@ module gpu_top_tb;
             end
             begin
                 repeat (20000) @(posedge clk);
-                $error("TIMEOUT — done never asserted after 20000 cycles");
+                $error("TIMEOUT");
                 errors++;
             end
         join_any
         disable fork;
         @(posedge clk); @(posedge clk);
 
-        // ─── Verify each output element ────────────────
-        $display("");
-        $display("─── Verification ──────────────────────────────");
         for (int row = 0; row < N_TEST; row++) begin
-            for (int col = 0; col < N_TEST; col++) begin
-                automatic int addr = row * N_TEST + col;
-                automatic logic [DATA_WIDTH-1:0] expected = compute_golden(
-                    row, col, N_TEST, base_addr_A, base_addr_B
-                );
-                automatic logic [DATA_WIDTH-1:0] got = mem_C[addr];
-
-                if (got !== expected) begin
-                    $error("  ✗ C[%0d][%0d] @ mem_C[%0d]: expected %0d, got %0d",
-                           row, col, addr, expected, got);
-                    errors++;
-                end else begin
-                    $display("  ✓ C[%0d][%0d] @ mem_C[%0d] = %0d",
-                             row, col, addr, got);
-                end
-            end
-        end
-
-        // ─── Sanity: expected number of writes ─────────
-        $display("");
-        if (writes_observed != N_TEST * N_TEST) begin
-            $error("Wrong write count: expected %0d, observed %0d",
-                   N_TEST * N_TEST, writes_observed);
-            errors++;
-        end else begin
-            $display("  ✓ Observed %0d writes (matches N²)", writes_observed);
-        end
-
-        // ─── Final report ──────────────────────────────
-        $display("");
-        $display("═══════════════════════════════════════════════");
-        if (errors == 0)
-            $display("  ✓ SYSTEM TEST PASSED");
-        else
-            $display("  ✗ SYSTEM TEST FAILED: %0d error(s)", errors);
-        $display("═══════════════════════════════════════════════");
-        $finish;
-    end
-
-    // ─── Timeout watchdog (separate from done-wait, for total runaway) ─
-    initial begin
-        #500000;
-        $fatal(1, "HARD TIMEOUT — sim ran way too long");
-    end
-
-endmodule
+            for (int col = 0; col < N_TEST; col++
