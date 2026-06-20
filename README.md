@@ -10,10 +10,38 @@ does not depend on any vendor GPU IP. All RTL is hand-written and verified
 in ModelSim ASE.
 
 
-The current configuration is `NUM_CORES = 2`, `THREADS_PER_CORE = 2`. Each
-core has its own A read, B read and C write port. There is no shared memory
-arbiter at this stage; the testbench models per-core dual-port BRAMs that all
-back onto a shared `mem_A` / `mem_B` / `mem_C` array for verification.
+The current configuration is `NUM_CORES = 2`, `THREADS_PER_CORE = 2`.
+
+### Memory architecture
+
+Three dual-port BRAMs back the design: one each for input matrices `A`, `B`
+and output matrix `C`. Port A of every BRAM is dedicated to core 0; port B
+of every BRAM is dedicated to core 1.
+
+```
+              bram_A (dual-port)    bram_B (dual-port)    bram_C (dual-port)
+              ┌──── portA ────┐    ┌──── portA ────┐    ┌──── portA ────┐
+              │               │    │               │    │               │
+              └──── portB ────┘    └──── portB ────┘    └──── portB ────┘
+                  │       │            │       │            │       │
+                  v       v            v       v            v       v
+                Core 0  Core 1       Core 0  Core 1       Core 0  Core 1
+```
+
+This is intentional. The Cyclone V M10K block RAMs are natively true dual-port,
+meaning each block already provides exactly the two simultaneous accesses
+that a 2-core SIMT machine needs. Each core gets one read of A, one read of B
+and one write of C per cycle, all in parallel, with **zero memory arbitration**.
+
+Scaling beyond two cores requires either banking (splitting A across multiple
+BRAMs by address bit) or arbitration. The `mem_controller.sv` module is the
+arbitration path — verified standalone, ready for the next architectural
+revision, but deliberately unused here because dual-port BRAMs already
+saturate the bandwidth requirement at this scale.
+
+The board-level wrapper `rtl/de1soc_top.sv` instantiates these three BRAMs
+and wires them to `gpu_top`. The simulation testbench instantiates the same
+three BRAM modules, so what runs in ModelSim is what gets synthesised.
 
 ### Execution model
 
@@ -38,13 +66,15 @@ block dispatches starts each kernel cleanly.
 
 | File | Lines | Role |
 |---|---:|---|
-| `rtl/gpu_top.sv`     |  94 | Top level. Instantiates dispatcher and N cores. Exposes per-core BRAM ports. |
-| `rtl/dispatcher.sv`  | 158 | Greedy block dispatcher with a priority-encoder picking the lowest-index free core each cycle. |
-| `rtl/core.sv`        | 160 | Per-core wrapper. Owns the scheduler, the thread instances and the address MUXes. |
-| `rtl/scheduler.sv`   | 161 | Kernel FSM: IDLE -> INIT -> WAIT -> FMA -> NEXT_T/NEXT_K -> WRITE -> NEXT_W -> DONE. |
-| `rtl/thread.sv`      |  75 | One output element. Address generation + accumulator + one FMA. |
-| `rtl/fma.sv`         |  27 | Integer fused multiply-add: `result = a*b + c`. |
-| `rtl/mem_controller.sv` | 152 | Round-robin memory arbiter (not currently wired into `gpu_top`; reserved for shared-memory scaling). |
+| `rtl/de1soc_top.sv`     | 150 | Board-level wrapper. Instantiates gpu_top + 3 dual-port BRAMs + button/LED/HEX I/O. **This is the synthesis top.** |
+| `rtl/gpu_top.sv`        |  94 | GPU top. Instantiates dispatcher and N cores. Exposes per-core BRAM ports. |
+| `rtl/dispatcher.sv`     | 158 | Greedy block dispatcher with a priority encoder picking the lowest-index free core each cycle. |
+| `rtl/core.sv`           | 160 | Per-core wrapper. Owns the scheduler, the thread instances and the address MUXes. |
+| `rtl/scheduler.sv`      | 161 | Kernel FSM: IDLE -> INIT -> WAIT -> FMA -> NEXT_T/NEXT_K -> WRITE -> NEXT_W -> DONE. |
+| `rtl/thread.sv`         |  75 | One output element. Address generation + accumulator + one FMA. |
+| `rtl/fma.sv`            |  27 | Integer fused multiply-add: `result = a*b + c`. |
+| `rtl/dual_port_bram.sv` |  60 | True dual-port BRAM, inferable to Cyclone V M10K. Three instances back the GPU. |
+| `rtl/mem_controller.sv` | 152 | Round-robin memory arbiter. Unit-tested in isolation (`src/tb/MemController/mem_controller_tb.sv`). Not used in the current top because dual-port BRAMs already provide enough bandwidth for 2 cores; reserved for the NUM_CORES > 2 case. |
 | `rtl/gpu_mem_master.sv` |  36 | Avalon-MM master stub for future SDRAM integration. |
 
 ### Parameters
@@ -134,6 +164,7 @@ display readback) is in progress and tracked separately.
 | `scheduler_tb`  | passing | FSM coverage including DONE re-entry. |
 | `dispatcher_tb` | passing | Single-core and multi-core dispatch ordering. |
 | `core_tb`       | passing | Two-thread block end-to-end. |
+| `mem_controller_tb` | passing | Round-robin arbiter standalone — tracks per-core read/write grants for fairness. Module not yet integrated into `gpu_top`. |
 | `gpu_top_tb`    | passing | 4x4 system-level matmul, exercises 8-block dispatch and `kernel_init` reset. |
 
 Verification is directed-test based, written in synthesisable-subset
@@ -149,9 +180,10 @@ randomisation, coverage, or class-based constructs).
   loop structure. A small load/store/FMA/branch ISA with an instruction
   ROM is the next major addition; that turns this from a matmul
   accelerator into a programmable GPU.
-- Per-core BRAM ports. The `mem_controller.sv` round-robin arbiter exists
-  but is not yet wired into `gpu_top`. Shared memory arrives with the
-  next architecture revision.
+- Scales to 2 cores natively, no further. Beyond `NUM_CORES = 2` the
+  dual-port BRAM bandwidth runs out and you need either banking or
+  arbitration. The verified `mem_controller.sv` is the arbitration path
+  when that day comes.
 - No DRAM. SDRAM controller IP is scaffolded under `SDRAM/` but the GPU
   currently runs entirely against on-chip BRAM.
 
