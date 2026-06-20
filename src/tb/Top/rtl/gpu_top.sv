@@ -92,9 +92,4 @@ module gpu_top #(
                 .wdata_C_out     (bram_c_wr_data[c]),
                 .we_C            (bram_c_wr_en[c]),
 
-                .done            (core_done[c])
-            );
-        end
-    endgenerate
-
-endmodule
+        

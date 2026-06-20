@@ -11,32 +11,6 @@ in ModelSim ASE.
 
 ---
 
-## Architecture overview
-
-```
-                                +--------------+
-                                |  dispatcher  |
-                                +------+-------+
-                                       | core_valid / core_start
-                                       | thread_id_start, thread_count
-                  +--------------------+--------------------+
-                  v                                         v
-            +-----------+                            +-----------+
-            |  core 0   |                            |  core 1   |
-            | +-------+ |                            | +-------+ |
-            | |sched- | |                            | |sched- | |
-            | | uler  | |                            | | uler  | |
-            | +-------+ |                            | +-------+ |
-            | thread x N|                            | thread x N|
-            | (each has |                            | (each has |
-            |  one FMA) |                            |  one FMA) |
-            +--+--+--+--+                            +--+--+--+--+
-               |  |  |                                  |  |  |
-               A  B  C  (per-core BRAM ports)           A  B  C
-               v  v  v                                  v  v  v
-            +--------------------- gpu_top.sv ---------------------+
-            |   Per-core split A/B/C memory ports exposed at top   |
-            +------------------------------------------------------+
 ```
 
 The current configuration is `NUM_CORES = 2`, `THREADS_PER_CORE = 2`. Each
@@ -184,11 +158,4 @@ randomisation, coverage, or class-based constructs).
 - No DRAM. SDRAM controller IP is scaffolded under `SDRAM/` but the GPU
   currently runs entirely against on-chip BRAM.
 
----
 
-## Authors
-
-Project work by Pouya Hatami (UBC ECE) and contributors. Originally forked
-from an early Adam-Maraj-inspired exploration; the dispatcher, scheduler,
-thread, FMA, memory subsystem and verification environment in this repo
-are an independent re-implementation.
