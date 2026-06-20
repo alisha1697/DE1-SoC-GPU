@@ -9,9 +9,6 @@ The project is built from scratch for educational and portfolio purposes; it
 does not depend on any vendor GPU IP. All RTL is hand-written and verified
 in ModelSim ASE.
 
----
-
-```
 
 The current configuration is `NUM_CORES = 2`, `THREADS_PER_CORE = 2`. Each
 core has its own A read, B read and C write port. There is no shared memory
