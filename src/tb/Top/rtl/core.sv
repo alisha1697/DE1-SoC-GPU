@@ -158,9 +158,4 @@ module core #(
     //     between them, just per-thread selection)
     //   - C write port driven only when scheduler's mem_write_en is high
     assign addr_A_out  = thread_addr_A[t_select];
-    assign addr_B_out  = thread_addr_B[t_select];
-    assign addr_C_out  = thread_addr_C[t_select];
-    assign wdata_C_out = thread_result[t_select];
-    assign we_C        = mem_write_en;
-
-endmodule
+    assign addr_B_out  = th

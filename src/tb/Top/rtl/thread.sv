@@ -73,21 +73,4 @@ module thread #(
             result <= '0;
             data_ready <= 1; // so its always ready for data
         end else if (kernel_init) begin
-            // Synchronous per-kernel reset. Takes priority over `en` and any
-            // FMA update so the new block always starts from a clean zero.
-            accumulator <= '0;
-            result      <= '0;
-        end else if (en) begin //set by the scheduler
-
-            //update the accumulator when fma completes
-            if(fma_valid_out) begin
-                accumulator <= fma_result;
-            end
-
-            //output the final result on last iteration
-            if(k == N - 1 && fma_valid_out) begin
-                result <= fma_result;
-            end
-        end
-    end
-endmodule
+            // Synchronous per-kernel reset. Takes priority over `en` 

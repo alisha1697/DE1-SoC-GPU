@@ -154,4 +154,30 @@ module gpu_top_tb;
         for (int row = 0; row < N_TEST; row++) begin
             for (int col = 0; col < N_TEST; col++) begin
                 automatic int addr = row * N_TEST + col;
-                automatic logic [DATA_WIDTH-1:0] expected = compute_golden(row, col, N_TE
+                automatic logic [DATA_WIDTH-1:0] expected = compute_golden(row, col, N_TEST);
+                if (mem_C[addr] !== expected) begin
+                    $error("  FAIL  C[%0d][%0d]: expected %0d, got %0d",
+                           row, col, expected, mem_C[addr]);
+                    errors++;
+                end else begin
+                    $display("  PASS  C[%0d][%0d] = %0d", row, col, mem_C[addr]);
+                end
+            end
+        end
+
+        if (writes_observed != N_TEST * N_TEST) begin
+            $error("Wrong write count: expected %0d, got %0d", N_TEST*N_TEST, writes_observed);
+            errors++;
+        end
+
+        $display("");
+        if (errors == 0)
+            $display("=== SYSTEM TEST PASSED ===");
+        else
+            $display("=== SYSTEM TEST FAILED: %0d errors ===", errors);
+        $finish;
+    end
+
+    initial begin #500000; $fatal(1, "HARD TIMEOUT"); end
+
+endmodule

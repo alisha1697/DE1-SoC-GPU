@@ -156,21 +156,4 @@ module dispatcher #(
                     end
  
                     // Step 4: kernel done? no work left AND no cores busy AND no pending valids
-                    if (threads_remaining == 16'd0
-                        && core_busy  == 0
-                        && core_valid == 0) begin
-                        state <= FINISH;
-                    end
-                end
-
-                FINISH: begin
-                    done <= 1'b1;
-                    state <= IDLE;
-                end
- 
-                default: state <= IDLE;
-            endcase
-        end
-    end
- 
-endmodule
+                    if (t
