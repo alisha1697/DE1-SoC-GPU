@@ -34,24 +34,24 @@ module thread #(
 
     fma #(
         .DATA_WIDTH(DATA_WIDTH)
-    ) fma_inst (  
-        .clk       (clk),  
-        .rst       (rst),  
-        .a         (a_val),  
-        .b         (b_val),  
-        .c         (accumulator),  
-        .valid_in  (data_valid && en),  
-        .result    (fma_result),  
+    ) fma_inst (
+        .clk       (clk),
+        .rst       (rst),
+        .a         (a_val),
+        .b         (b_val),
+        .c         (accumulator),
+        .valid_in  (data_valid && en),
+        .result    (fma_result),
         .valid_out (fma_valid_out)
     );
 
 
-    always_comb begin  
+    always_comb begin
         row = thread_id / N; // to know which row of the matrix
         col = thread_id % N; // to know which column of the matrix
     end
-    
-    always_comb begin 
+
+    always_comb begin
 
         // skip row rows and take the kth element in that row
         addr_A = base_addr_A + (row * N) + k;
@@ -66,11 +66,28 @@ module thread #(
     //ACCUMULATOR AND RESULT MANAGEMENT
         // accumulator should store the partial sum across k iterations
         // and when k = N -1 which is the last iteration, the accumulator holds the final C[i][j] value as the final result for output
-        
+
     always @(posedge clk) begin
         if(rst) begin
             accumulator <= '0;
             result <= '0;
             data_ready <= 1; // so its always ready for data
         end else if (kernel_init) begin
-            // Synchronous per-kernel reset. Takes priority over `en` 
+            // Synchronous per-kernel reset. Takes priority over `en` and any
+            // FMA update so the new block always starts from a clean zero.
+            accumulator <= '0;
+            result      <= '0;
+        end else if (en) begin //set by the scheduler
+
+            //update the accumulator when fma completes
+            if(fma_valid_out) begin
+                accumulator <= fma_result;
+            end
+
+            //output the final result on last iteration
+            if(k == N - 1 && fma_valid_out) begin
+                result <= fma_result;
+            end
+        end
+    end
+endmodule

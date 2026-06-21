@@ -5,14 +5,19 @@
 // reports done.
 //
 // Internal pieces:
-//   - 1x scheduler   (the kernel FSM)
+//   - 1x scheduler   (the kernel FSM — now stall-aware, see scheduler.sv)
 //   - N x thread     (one per THREADS_PER_CORE, each contains an FMA)
 //   - Address MUXes  (pick t_select's thread address each cycle)
+//   - A/B latches    (hold the most recent granted read response stable
+//                     for the threads, since the shared bus value changes
+//                     as soon as another core's request is serviced)
 //
-// Memory interface (split A/B/C ports — assumes Option 3 banked memory):
-//   - addr_A_out / matrix_a_data   : A read port
-//   - addr_B_out / matrix_b_data   : B read port
-//   - addr_C_out / wdata_C / we_C  : C write port
+// Memory interface (memory-controller version — Choice B):
+//   A, B and C are each behind their own round-robin arbiter
+//   (rr_read_arbiter / rr_write_arbiter in gpu_top.sv) shared by all cores.
+//   This core issues req_valid/req_addr and consumes req_ready/resp_valid/
+//   resp_data; it does NOT assume fixed memory latency or a dedicated port.
+//   A losing core simply keeps req_valid asserted and visibly stalls.
 //
 // Dispatcher interface:
 //   valid: dispatcher has a block ready for this core
@@ -21,10 +26,8 @@
 //   thread_id_start, thread_count: block parameters
 //
 // NOTE on multi-block execution:
-//   The scheduler stays in DONE state after finishing a block until reset.
-//   For the core to run multiple blocks, the scheduler needs a DONE→IDLE
-//   transition (e.g., `if (start) state <= INIT` inside DONE). Without it,
-//   only the first block dispatched to each core will run.
+//   The scheduler stays in DONE_ST after finishing a block until reset or a
+//   new start pulse (DONE_ST -> INIT transition is built in).
 
 `timescale 1ns/1ns
 
@@ -50,21 +53,31 @@ module core #(
     input  logic [ADDR_WIDTH-1:0]   base_addr_B,
     input  logic [ADDR_WIDTH-1:0]   base_addr_C,
 
-    // Memory: A read port
-    output logic [ADDR_WIDTH-1:0]   addr_A_out,
-    input  logic [DATA_WIDTH-1:0]   matrix_a_data,
+    // ── Memory-controller handshake: A read channel ─────────────────────
+    output logic                    a_req_valid,
+    output logic [ADDR_WIDTH-1:0]   a_req_addr,
+    input  logic                    a_req_ready,
+    input  logic                    a_resp_valid,
+    input  logic [DATA_WIDTH-1:0]   a_resp_data,
 
-    // Memory: B read port 
-    output logic [ADDR_WIDTH-1:0]   addr_B_out,
-    input  logic [DATA_WIDTH-1:0]   matrix_b_data,
+    // ── Memory-controller handshake: B read channel ─────────────────────
+    output logic                    b_req_valid,
+    output logic [ADDR_WIDTH-1:0]   b_req_addr,
+    input  logic                    b_req_ready,
+    input  logic                    b_resp_valid,
+    input  logic [DATA_WIDTH-1:0]   b_resp_data,
 
-    // Memory: C write port 
-    output logic [ADDR_WIDTH-1:0]   addr_C_out,
-    output logic [DATA_WIDTH-1:0]   wdata_C_out,
-    output logic                    we_C,
+    // ── Memory-controller handshake: C write channel ────────────────────
+    output logic                    c_req_valid,
+    output logic [ADDR_WIDTH-1:0]   c_req_addr,
+    output logic [DATA_WIDTH-1:0]   c_req_data,
+    input  logic                    c_req_ready,
 
-    //  Status back to dispatcher 
-    output logic                    done
+    //  Status back to dispatcher
+    output logic                    done,
+
+    // Debug — cycles this core spent stalled waiting on memory
+    output logic [31:0]             stall_cycles
 );
 
     // The core is "ready" when not currently running a block.
@@ -74,7 +87,7 @@ module core #(
         else if (start)   busy <= 1'b1;   // dispatcher kicked us off
         else if (done)    busy <= 1'b0;   // kernel finished
     end
-    assign ready = !busy; //valid ready handshake 
+    assign ready = !busy; //valid ready handshake
 
     // The dispatcher's `valid` is observed but not directly used here —
     // the actual "go" signal is `start` which the dispatcher pulses
@@ -90,9 +103,7 @@ module core #(
     logic [THREADS_PER_CORE-1:0]     data_valid;
     logic [THREADS_PER_CORE-1:0]     fma_en;
     logic [7:0]                      k;
-    logic                            mem_write_en;
     logic                            kernel_init;   // one-cycle pulse, broadcast to all threads
-
 
     scheduler #(
         .THREADS_PER_CORE (THREADS_PER_CORE)
@@ -106,13 +117,41 @@ module core #(
         .data_valid   (data_valid),
         .fma_en       (fma_en),
         .k            (k),
-        .mem_write_en (mem_write_en),
         .kernel_init  (kernel_init),
+
+        .a_req_valid  (a_req_valid),
+        .a_req_ready  (a_req_ready),
+        .a_resp_valid (a_resp_valid),
+
+        .b_req_valid  (b_req_valid),
+        .b_req_ready  (b_req_ready),
+        .b_resp_valid (b_resp_valid),
+
+        .c_req_valid  (c_req_valid),
+        .c_req_ready  (c_req_ready),
+
         .state        (/* unused */),
+        .stall_cycles (stall_cycles),
         .done         (done)
     );
 
-    // Per-thread output arrays (filled by thread instances
+    // ── A/B response latches ────────────────────────────────────────────
+    // The shared bus (a_resp_data/b_resp_data) only holds *this* core's
+    // value during the single cycle resp_valid is high for it — another
+    // core may be granted the very next cycle. Threads need a stable value
+    // for the whole time between requests, so latch it here.
+    logic [DATA_WIDTH-1:0] a_latched, b_latched;
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            a_latched <= '0;
+            b_latched <= '0;
+        end else begin
+            if (a_resp_valid) a_latched <= a_resp_data;
+            if (b_resp_valid) b_latched <= b_resp_data;
+        end
+    end
+
+    // Per-thread output arrays (filled by thread instances)
     logic [ADDR_WIDTH-1:0]  thread_addr_A [THREADS_PER_CORE];
     logic [ADDR_WIDTH-1:0]  thread_addr_B [THREADS_PER_CORE];
     logic [ADDR_WIDTH-1:0]  thread_addr_C [THREADS_PER_CORE];
@@ -122,7 +161,7 @@ module core #(
     // Threads (generate loop)
     //   - Each thread gets a unique thread_id = thread_id_start + i
     //   - en = (i < thread_count) — disables threads beyond the block size
-    //   - All threads share the data buses (matrix_a_data, matrix_b_data)
+    //   - All threads share the latched A/B data buses
     // ─────────────────────────────────────────────
     genvar i;
     generate
@@ -142,8 +181,8 @@ module core #(
                 .base_addr_B (base_addr_B),
                 .base_addr_C (base_addr_C),
                 .data_valid  (data_valid[i]),
-                .a_val       (matrix_a_data),
-                .b_val       (matrix_b_data),
+                .a_val       (a_latched),
+                .b_val       (b_latched),
                 .data_ready  (),                  // unused
                 .addr_A      (thread_addr_A[i]),
                 .addr_B      (thread_addr_B[i]),
@@ -153,9 +192,10 @@ module core #(
         end
     endgenerate
 
-    // Address MUXes — pick t_select's thread address for each port
-    //   - A and B are driven in parallel (separate ports, no MUX needed
-    //     between them, just per-thread selection)
-    //   - C write port driven only when scheduler's mem_write_en is high
-    assign addr_A_out  = thread_addr_A[t_select];
-    assign addr_B_out  = th
+    // Address MUXes — pick t_select's thread address/data for each channel
+    assign a_req_addr = thread_addr_A[t_select];
+    assign b_req_addr = thread_addr_B[t_select];
+    assign c_req_addr = thread_addr_C[t_select];
+    assign c_req_data = thread_result[t_select];
+
+endmodule

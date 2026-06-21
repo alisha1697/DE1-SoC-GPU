@@ -1,15 +1,24 @@
 // =============================================================================
-// gpu_top.sv — Top-Level GPU Module (per-core memory ports)
+// gpu_top.sv — Top-Level GPU Module (shared memory-controller version)
 //
-// Each core has its own A read, B read, and C write port exposed externally.
-// No arbitration inside — cores access memory in parallel without contention
-// because each has its own port.
+// NUM_CORES cores share three physical BRAM ports (A read, B read, C write)
+// through round-robin arbiters (rr_read_arbiter / rr_write_arbiter). This
+// replaces the old per-core dedicated-port architecture, which only worked
+// because dual-port BRAM gives exactly two ports — fine for NUM_CORES=2, but
+// it does not scale.
+//
+// Everything here is parameterized on NUM_CORES, so going from 4 to 8 (or
+// down to 1) is a parameter change, not a rewrite: the core array, the
+// arbiters, and the dispatcher all use generate/for loops over NUM_CORES.
+// The only thing that does NOT scale for free is physical BRAM bandwidth —
+// more cores sharing one port means more contention, which is the explicit
+// point of this design (see stall_cycles / grant_count below).
 // =============================================================================
 
 module gpu_top #(
     parameter DATA_WIDTH       = 16,
     parameter ADDR_WIDTH       = 16,
-    parameter NUM_CORES        = 2,
+    parameter NUM_CORES        = 4,
     parameter THREADS_PER_CORE = 2
 )(
     input  logic                   clk,
@@ -20,18 +29,30 @@ module gpu_top #(
     input  logic [ADDR_WIDTH-1:0]  base_addr_B,
     input  logic [ADDR_WIDTH-1:0]  base_addr_C,
 
-    // Per-core memory ports
-    output logic [ADDR_WIDTH-1:0]  bram_a_addr    [NUM_CORES-1:0],
-    input  logic [DATA_WIDTH-1:0]  bram_a_rd_data [NUM_CORES-1:0],
+    // Single shared BRAM port per matrix (one physical read/write port,
+    // arbitrated across all NUM_CORES cores)
+    output logic [ADDR_WIDTH-1:0]  bram_a_addr,
+    output logic                   bram_a_rd_en,
+    input  logic [DATA_WIDTH-1:0]  bram_a_rd_data,
 
-    output logic [ADDR_WIDTH-1:0]  bram_b_addr    [NUM_CORES-1:0],
-    input  logic [DATA_WIDTH-1:0]  bram_b_rd_data [NUM_CORES-1:0],
+    output logic [ADDR_WIDTH-1:0]  bram_b_addr,
+    output logic                   bram_b_rd_en,
+    input  logic [DATA_WIDTH-1:0]  bram_b_rd_data,
 
-    output logic [ADDR_WIDTH-1:0]  bram_c_addr    [NUM_CORES-1:0],
-    output logic [DATA_WIDTH-1:0]  bram_c_wr_data [NUM_CORES-1:0],
-    output logic [NUM_CORES-1:0]   bram_c_wr_en,
+    output logic [ADDR_WIDTH-1:0]  bram_c_addr,
+    output logic [DATA_WIDTH-1:0]  bram_c_wr_data,
+    output logic                   bram_c_wr_en,
 
-    output logic                   done
+    output logic                   done,
+
+    // ── Debug / fairness instrumentation ────────────────────────────────
+    output logic [31:0]            a_grant_count [NUM_CORES-1:0],
+    output logic [31:0]            b_grant_count [NUM_CORES-1:0],
+    output logic [31:0]            c_grant_count [NUM_CORES-1:0],
+    output logic [31:0]            a_stall_cycles,
+    output logic [31:0]            b_stall_cycles,
+    output logic [31:0]            c_stall_cycles,
+    output logic [31:0]            core_stall_cycles [NUM_CORES-1:0]
 );
 
     // Dispatcher <-> Cores wires
@@ -41,6 +62,19 @@ module gpu_top #(
     logic [NUM_CORES-1:0]  core_done;
     logic [15:0]           core_thread_id    [NUM_CORES-1:0];
     logic [15:0]           core_thread_count [NUM_CORES-1:0];
+
+    // Core <-> arbiter wires (one slot per core, per channel)
+    logic [NUM_CORES-1:0]   a_req_valid, a_req_ready, a_resp_valid;
+    logic [ADDR_WIDTH-1:0]  a_req_addr  [NUM_CORES-1:0];
+    logic [DATA_WIDTH-1:0]  a_resp_data [NUM_CORES-1:0];
+
+    logic [NUM_CORES-1:0]   b_req_valid, b_req_ready, b_resp_valid;
+    logic [ADDR_WIDTH-1:0]  b_req_addr  [NUM_CORES-1:0];
+    logic [DATA_WIDTH-1:0]  b_resp_data [NUM_CORES-1:0];
+
+    logic [NUM_CORES-1:0]   c_req_valid, c_req_ready;
+    logic [ADDR_WIDTH-1:0]  c_req_addr  [NUM_CORES-1:0];
+    logic [DATA_WIDTH-1:0]  c_req_data  [NUM_CORES-1:0];
 
     // Dispatcher
     dispatcher #(
@@ -84,12 +118,86 @@ module gpu_top #(
                 .base_addr_B     (base_addr_B),
                 .base_addr_C     (base_addr_C),
 
-                .addr_A_out      (bram_a_addr[c]),
-                .matrix_a_data   (bram_a_rd_data[c]),
-                .addr_B_out      (bram_b_addr[c]),
-                .matrix_b_data   (bram_b_rd_data[c]),
-                .addr_C_out      (bram_c_addr[c]),
-                .wdata_C_out     (bram_c_wr_data[c]),
-                .we_C            (bram_c_wr_en[c]),
+                .a_req_valid     (a_req_valid[c]),
+                .a_req_addr      (a_req_addr[c]),
+                .a_req_ready     (a_req_ready[c]),
+                .a_resp_valid    (a_resp_valid[c]),
+                .a_resp_data     (a_resp_data[c]),
 
-        
+                .b_req_valid     (b_req_valid[c]),
+                .b_req_addr      (b_req_addr[c]),
+                .b_req_ready     (b_req_ready[c]),
+                .b_resp_valid    (b_resp_valid[c]),
+                .b_resp_data     (b_resp_data[c]),
+
+                .c_req_valid     (c_req_valid[c]),
+                .c_req_addr      (c_req_addr[c]),
+                .c_req_data      (c_req_data[c]),
+                .c_req_ready     (c_req_ready[c]),
+
+                .done            (core_done[c]),
+                .stall_cycles    (core_stall_cycles[c])
+            );
+        end
+    endgenerate
+
+    // ── A read arbiter ───────────────────────────────────────────────────
+    rr_read_arbiter #(
+        .DATA_WIDTH (DATA_WIDTH),
+        .ADDR_WIDTH (ADDR_WIDTH),
+        .NUM_CORES  (NUM_CORES)
+    ) u_a_arbiter (
+        .clk          (clk),
+        .rst          (rst),
+        .req_valid    (a_req_valid),
+        .req_addr     (a_req_addr),
+        .req_ready    (a_req_ready),
+        .resp_valid   (a_resp_valid),
+        .resp_data    (a_resp_data),
+        .bram_addr    (bram_a_addr),
+        .bram_rd_en   (bram_a_rd_en),
+        .bram_rd_data (bram_a_rd_data),
+        .grant_count  (a_grant_count),
+        .stall_cycles (a_stall_cycles)
+    );
+
+    // ── B read arbiter ───────────────────────────────────────────────────
+    rr_read_arbiter #(
+        .DATA_WIDTH (DATA_WIDTH),
+        .ADDR_WIDTH (ADDR_WIDTH),
+        .NUM_CORES  (NUM_CORES)
+    ) u_b_arbiter (
+        .clk          (clk),
+        .rst          (rst),
+        .req_valid    (b_req_valid),
+        .req_addr     (b_req_addr),
+        .req_ready    (b_req_ready),
+        .resp_valid   (b_resp_valid),
+        .resp_data    (b_resp_data),
+        .bram_addr    (bram_b_addr),
+        .bram_rd_en   (bram_b_rd_en),
+        .bram_rd_data (bram_b_rd_data),
+        .grant_count  (b_grant_count),
+        .stall_cycles (b_stall_cycles)
+    );
+
+    // ── C write arbiter ──────────────────────────────────────────────────
+    rr_write_arbiter #(
+        .DATA_WIDTH (DATA_WIDTH),
+        .ADDR_WIDTH (ADDR_WIDTH),
+        .NUM_CORES  (NUM_CORES)
+    ) u_c_arbiter (
+        .clk          (clk),
+        .rst          (rst),
+        .req_valid    (c_req_valid),
+        .req_addr     (c_req_addr),
+        .req_data     (c_req_data),
+        .req_ready    (c_req_ready),
+        .bram_addr    (bram_c_addr),
+        .bram_wr_data (bram_c_wr_data),
+        .bram_wr_en   (bram_c_wr_en),
+        .grant_count  (c_grant_count),
+        .stall_cycles (c_stall_cycles)
+    );
+
+endmodule
