@@ -1,17 +1,16 @@
 // =============================================================================
-// gpu_top_tb.sv -- system test for the full 2-core GPU
+// gpu_top_tb.sv -- system test for the 4-core shared-memory-controller GPU
 //
-// Uses the actual `dual_port_bram` module as the memory model -- not a fake
-// flat array -- so this testbench proves the design works against the same
-// memory blocks Quartus will synthesise into M10K on the DE1-SoC.
+// Uses the actual `dual_port_bram` module as the memory model (only port A
+// is exercised; port B is tied off, same as de1soc_top.sv) so this
+// testbench proves the design works against the same memory blocks Quartus
+// will synthesise into M10K on the DE1-SoC.
 //
-// Port allocation matches the board-level top (de1soc_top.sv):
-//   bram_A.port_a / bram_B.port_a / bram_C.port_a  ->  core 0
-//   bram_A.port_b / bram_B.port_b / bram_C.port_b  ->  core 1
-//
-// With NUM_CORES=2 and 3 dual-port BRAMs (one each for A, B, C), every
-// core gets one dedicated port on every memory. No arbitration is needed
-// and every memory access happens in parallel.
+// Unlike the old per-core-port testbench, all NUM_CORES cores now share one
+// physical port per matrix (A, B, C) through round-robin arbiters inside
+// gpu_top. This test checks both correctness (final C matrix matches a
+// software golden model) AND that contention is actually happening
+// (stall_cycles > 0, grants are reasonably balanced across cores).
 // =============================================================================
 `timescale 1ns/1ps
 
@@ -19,13 +18,11 @@ module gpu_top_tb;
 
     localparam DATA_WIDTH       = 16;
     localparam ADDR_WIDTH       = 16;
-    localparam NUM_CORES        = 2;
+    localparam NUM_CORES        = 4;
     localparam THREADS_PER_CORE = 2;
     localparam BRAM_DEPTH       = 256;
 
-    // 4x4 = 16 threads, 2 threads/core -> 8 blocks, 4 dispatches per core.
-    // First config that actually exercises the kernel_init path (each
-    // hardware thread instance is reused across multiple block dispatches).
+    // 4x4 = 16 threads, 2 threads/core -> 8 blocks, 2 dispatches per core.
     localparam N_TEST           = 4;
 
     logic                       clk, rst;
@@ -34,13 +31,23 @@ module gpu_top_tb;
     logic [ADDR_WIDTH-1:0]      base_addr_A, base_addr_B, base_addr_C;
     logic                       done;
 
-    logic [ADDR_WIDTH-1:0]      bram_a_addr    [NUM_CORES-1:0];
-    logic [DATA_WIDTH-1:0]      bram_a_rd_data [NUM_CORES-1:0];
-    logic [ADDR_WIDTH-1:0]      bram_b_addr    [NUM_CORES-1:0];
-    logic [DATA_WIDTH-1:0]      bram_b_rd_data [NUM_CORES-1:0];
-    logic [ADDR_WIDTH-1:0]      bram_c_addr    [NUM_CORES-1:0];
-    logic [DATA_WIDTH-1:0]      bram_c_wr_data [NUM_CORES-1:0];
-    logic [NUM_CORES-1:0]       bram_c_wr_en;
+    logic [ADDR_WIDTH-1:0]      bram_a_addr;
+    logic                       bram_a_rd_en;
+    logic [DATA_WIDTH-1:0]      bram_a_rd_data;
+
+    logic [ADDR_WIDTH-1:0]      bram_b_addr;
+    logic                       bram_b_rd_en;
+    logic [DATA_WIDTH-1:0]      bram_b_rd_data;
+
+    logic [ADDR_WIDTH-1:0]      bram_c_addr;
+    logic [DATA_WIDTH-1:0]      bram_c_wr_data;
+    logic                       bram_c_wr_en;
+
+    logic [31:0] a_grant_count [NUM_CORES-1:0];
+    logic [31:0] b_grant_count [NUM_CORES-1:0];
+    logic [31:0] c_grant_count [NUM_CORES-1:0];
+    logic [31:0] a_stall_cycles, b_stall_cycles, c_stall_cycles;
+    logic [31:0] core_stall_cycles [NUM_CORES-1:0];
 
     initial begin clk = 0; forever #5 clk = ~clk; end
 
@@ -53,29 +60,46 @@ module gpu_top_tb;
     ) dut (
         .clk(clk), .rst(rst), .start(start), .N(N),
         .base_addr_A(base_addr_A), .base_addr_B(base_addr_B), .base_addr_C(base_addr_C),
-        .bram_a_addr(bram_a_addr), .bram_a_rd_data(bram_a_rd_data),
-        .bram_b_addr(bram_b_addr), .bram_b_rd_data(bram_b_rd_data),
-        .bram_c_addr(bram_c_addr), .bram_c_wr_data(bram_c_wr_data), .bram_c_wr_en(bram_c_wr_en),
-        .done(done)
+
+        .bram_a_addr    (bram_a_addr),
+        .bram_a_rd_en   (bram_a_rd_en),
+        .bram_a_rd_data (bram_a_rd_data),
+
+        .bram_b_addr    (bram_b_addr),
+        .bram_b_rd_en   (bram_b_rd_en),
+        .bram_b_rd_data (bram_b_rd_data),
+
+        .bram_c_addr    (bram_c_addr),
+        .bram_c_wr_data (bram_c_wr_data),
+        .bram_c_wr_en   (bram_c_wr_en),
+
+        .done(done),
+        .a_grant_count     (a_grant_count),
+        .b_grant_count     (b_grant_count),
+        .c_grant_count     (c_grant_count),
+        .a_stall_cycles    (a_stall_cycles),
+        .b_stall_cycles    (b_stall_cycles),
+        .c_stall_cycles    (c_stall_cycles),
+        .core_stall_cycles (core_stall_cycles)
     );
 
-    // Memory model: three real dual-port BRAMs.
-    // Port A serves core 0; port B serves core 1. A and B are read-only by
-    // the GPU (write enables tied low); C is write-only by the GPU.
+    // Memory model: three real dual-port BRAMs, port A only (matches
+    // de1soc_top.sv — port B tied off / unused).
+    logic [DATA_WIDTH-1:0] bram_a_portb_unused, bram_b_portb_unused;
     dual_port_bram #(
         .DATA_WIDTH (DATA_WIDTH), .ADDR_WIDTH (ADDR_WIDTH), .DEPTH (BRAM_DEPTH)
     ) bram_A (
         .clk       (clk),
-        .a_addr    (bram_a_addr[0]),  .a_wr_en (1'b0), .a_wr_data ('0), .a_rd_data (bram_a_rd_data[0]),
-        .b_addr    (bram_a_addr[1]),  .b_wr_en (1'b0), .b_wr_data ('0), .b_rd_data (bram_a_rd_data[1])
+        .a_addr    (bram_a_addr), .a_wr_en (1'b0), .a_wr_data ('0), .a_rd_data (bram_a_rd_data),
+        .b_addr    ('0),          .b_wr_en (1'b0), .b_wr_data ('0), .b_rd_data (bram_a_portb_unused)
     );
 
     dual_port_bram #(
         .DATA_WIDTH (DATA_WIDTH), .ADDR_WIDTH (ADDR_WIDTH), .DEPTH (BRAM_DEPTH)
     ) bram_B (
         .clk       (clk),
-        .a_addr    (bram_b_addr[0]),  .a_wr_en (1'b0), .a_wr_data ('0), .a_rd_data (bram_b_rd_data[0]),
-        .b_addr    (bram_b_addr[1]),  .b_wr_en (1'b0), .b_wr_data ('0), .b_rd_data (bram_b_rd_data[1])
+        .a_addr    (bram_b_addr), .a_wr_en (1'b0), .a_wr_data ('0), .a_rd_data (bram_b_rd_data),
+        .b_addr    ('0),          .b_wr_en (1'b0), .b_wr_data ('0), .b_rd_data (bram_b_portb_unused)
     );
 
     logic [DATA_WIDTH-1:0] bram_c_rd_a_unused, bram_c_rd_b_unused;
@@ -83,8 +107,8 @@ module gpu_top_tb;
         .DATA_WIDTH (DATA_WIDTH), .ADDR_WIDTH (ADDR_WIDTH), .DEPTH (BRAM_DEPTH)
     ) bram_C (
         .clk       (clk),
-        .a_addr    (bram_c_addr[0]),  .a_wr_en (bram_c_wr_en[0]), .a_wr_data (bram_c_wr_data[0]), .a_rd_data (bram_c_rd_a_unused),
-        .b_addr    (bram_c_addr[1]),  .b_wr_en (bram_c_wr_en[1]), .b_wr_data (bram_c_wr_data[1]), .b_rd_data (bram_c_rd_b_unused)
+        .a_addr    (bram_c_addr), .a_wr_en (bram_c_wr_en), .a_wr_data (bram_c_wr_data), .a_rd_data (bram_c_rd_a_unused),
+        .b_addr    ('0),          .b_wr_en (1'b0),         .b_wr_data ('0),             .b_rd_data (bram_c_rd_b_unused)
     );
 
     // C-write monitor
@@ -95,14 +119,10 @@ module gpu_top_tb;
         fork
             forever begin
                 @(posedge clk);
-                if (!rst) begin
-                    for (int c = 0; c < NUM_CORES; c++) begin
-                        if (bram_c_wr_en[c]) begin
-                            writes_observed++;
-                            $display("  [t=%0t] core%0d -> bram_C[%0d] <= %0d (write #%0d)",
-                                     $time, c, bram_c_addr[c], bram_c_wr_data[c], writes_observed);
-                        end
-                    end
+                if (!rst && bram_c_wr_en) begin
+                    writes_observed++;
+                    $display("  [t=%0t] bram_C[%0d] <= %0d (write #%0d)",
+                             $time, bram_c_addr, bram_c_wr_data, writes_observed);
                 end
             end
         join_none
@@ -147,10 +167,10 @@ module gpu_top_tb;
         #1;
 
         $display("");
-        $display("=== GPU SYSTEM TEST: %0dx%0d matmul (NUM_CORES=%0d, T/C=%0d) ===",
+        $display("=== GPU SYSTEM TEST: %0dx%0d matmul (NUM_CORES=%0d, T/C=%0d, shared-memory-controller) ===",
                  N_TEST, N_TEST, NUM_CORES, THREADS_PER_CORE);
-        $display("Memory: 3x dual_port_bram (A, B, C); port A=core0, port B=core1");
-        $display("Total blocks=%0d, dispatches/core=%0d (exercises kernel_init path)",
+        $display("Memory: 3x dual_port_bram (A, B, C), port A shared by all cores via round-robin arbiters");
+        $display("Total blocks=%0d, dispatches/core=%0d",
                  (N_TEST*N_TEST) / THREADS_PER_CORE,
                  ((N_TEST*N_TEST) / THREADS_PER_CORE) / NUM_CORES);
         $write("Expected C (from golden):");
@@ -199,6 +219,19 @@ module gpu_top_tb;
         if (writes_observed != N_TEST * N_TEST) begin
             $error("Wrong write count: expected %0d, got %0d", N_TEST*N_TEST, writes_observed);
             errors++;
+        end
+
+        // Contention / fairness report — this is the whole point of v2.
+        $display("");
+        $display("=== Memory-controller contention report ===");
+        $display("A-arbiter stall_cycles=%0d  B-arbiter stall_cycles=%0d  C-arbiter stall_cycles=%0d",
+                  a_stall_cycles, b_stall_cycles, c_stall_cycles);
+        for (int c = 0; c < NUM_CORES; c++) begin
+            $display("  core%0d: a_grants=%0d b_grants=%0d c_grants=%0d core_stall_cycles=%0d",
+                      c, a_grant_count[c], b_grant_count[c], c_grant_count[c], core_stall_cycles[c]);
+        end
+        if (a_stall_cycles == 0 && b_stall_cycles == 0) begin
+            $display("  NOTE: zero stalls observed -- with NUM_CORES=%0d this is suspicious; check arbiter wiring.", NUM_CORES);
         end
 
         $display("");

@@ -150,4 +150,7 @@ module mem_controller #(
                 bram_c_addr    = core_write_addr[i];
                 bram_c_wr_data = core_write_data[i];
             end
-        e
+        end
+    end
+
+endmodule

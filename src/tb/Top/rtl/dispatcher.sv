@@ -1,5 +1,5 @@
 // =============================================================================
-// dispatcher.sv  
+// dispatcher.sv
 // Hands out blocks to whichever core is free, one at a time, as cores free up.
 //
 //
@@ -24,39 +24,39 @@ module dispatcher #(
     input  logic                       clk, rst, start,
     input  logic [7:0]                 N,
     input  logic [NUM_CORES-1:0]       core_done, core_ready,
- 
+
     output logic [NUM_CORES-1:0]       core_valid, core_start,
     output logic [15:0]                core_thread_id [NUM_CORES-1:0],
     output logic [15:0]                core_thread_count    [NUM_CORES-1:0],
- 
+
     output logic                       done
 );
- 
-    typedef enum logic [1:0] 
+
+    typedef enum logic [1:0]
     { IDLE, RUN, FINISH } state_t;
     state_t state;
- 
 
-    //next thread to be assigned 
+
+    //next thread to be assigned
     logic [15:0]                 next_thread_id;
 
     logic [15:0]                 threads_remaining; //N*N
     logic [NUM_CORES-1:0]        core_busy;
- 
-  
+
+
     logic [NUM_CORES-1:0]        handshake;
     assign handshake = core_valid & core_ready;
- 
-  
+
+
     // Combinational: pick the next core to assign
     //   (lowest-index core that is free and has no pending valid)
     logic [CIDX_W-1:0]           next_core_idx;
     logic                        any_cores_selected;
- 
+
     always_comb begin
         next_core_idx  = 0;
-        // this signal is to differentiate between core0 being free vs core0 being busy 
-        any_cores_selected = 1'b0; //? 
+        // this signal is to differentiate between core0 being free vs core0 being busy
+        any_cores_selected = 1'b0; //?
 
         // This is basically a priority encoder to pick the lowest-index free core with no pending valid
         // if (!core_busy[0] && !core_valid[0] && !handshake[0]) begin
@@ -71,7 +71,7 @@ module dispatcher #(
         // end else if (!core_busy[3] && !core_valid[3] && !handshake[3]) begin
         //     next_core_idx = 3;
         //     any_cores_selected = 1'b1;
-        // end    
+        // end
 
 
         for (int i = 0; i < NUM_CORES; i++) begin
@@ -80,26 +80,26 @@ module dispatcher #(
             if (!core_busy[i] && !core_valid[i] && !handshake[i]
                 && !any_cores_selected) begin
                 next_core_idx  = i[CIDX_W-1:0];
-                // this is to not overwrite 
-                // only one core gets selected at a time 
+                // this is to not overwrite
+                // only one core gets selected at a time
                 any_cores_selected = 1'b1;
             end
         end
     end
- 
+
     logic [15:0] next_block_size;
     always_comb begin
         next_block_size = (threads_remaining >= 16'(THREADS_PER_CORE))
                           ? 16'(THREADS_PER_CORE)
                           : threads_remaining;
     end
- 
+
     // FSM
     always_ff @(posedge clk or posedge rst) begin
         if (rst) begin
             state              <= IDLE;
             next_thread_id     <= 0;
-            threads_remaining  <= 16'(N)*16'(N); 
+            threads_remaining  <= 16'(N)*16'(N);
             core_busy          <= 0;
             core_valid         <= 0;
             core_start         <= 0;
@@ -109,9 +109,9 @@ module dispatcher #(
                 core_thread_count[i]    <= 0;
             end
         end else begin
-            
+
             case (state)
-              
+
                 IDLE: begin
                     core_valid <= 0;
                     if (start) begin
@@ -121,7 +121,7 @@ module dispatcher #(
                         state             <= RUN;
                     end
                 end
- 
+
                 RUN: begin
                     // Default: deassert core_start every cycle. The handshake
                     // logic below re-asserts it for exactly one cycle when a
@@ -138,14 +138,20 @@ module dispatcher #(
                             core_busy[i]  <= 1'b1;
                         end
                     end
- 
-                    // Step 2: handle completions 
+
+                    // Step 2: handle completions
+                    // Must NOT clear core_busy[i] for a core that is being
+                    // re-handshaked this same cycle (Step 1) -- see canonical
+                    // rtl/dispatcher.sv for the full explanation. Stale
+                    // done=1 from the previous kernel would otherwise
+                    // clobber Step 1's busy<=1 and cause a third block to be
+                    // dispatched on top of a still-running second one.
                     for (int i = 0; i < NUM_CORES; i++) begin
-                        if (core_done[i]) begin
+                        if (core_done[i] && !handshake[i]) begin
                             core_busy[i] <= 1'b0;
                         end
                     end
- 
+
                     // Step 3: assign at most ONE new block this cycle
                     if (any_cores_selected && (threads_remaining > 16'd0)) begin
                         core_thread_id[next_core_idx] <= next_thread_id;
@@ -154,6 +160,23 @@ module dispatcher #(
                         next_thread_id                      <= next_thread_id + next_block_size;
                         threads_remaining                   <= threads_remaining - next_block_size;
                     end
- 
+
                     // Step 4: kernel done? no work left AND no cores busy AND no pending valids
-                    if (t
+                    if (threads_remaining == 16'd0
+                        && core_busy  == 0
+                        && core_valid == 0) begin
+                        state <= FINISH;
+                    end
+                end
+
+                FINISH: begin
+                    done <= 1'b1;
+                    state <= IDLE;
+                end
+
+                default: state <= IDLE;
+            endcase
+        end
+    end
+
+endmodule

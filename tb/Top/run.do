@@ -1,7 +1,11 @@
 # =============================================================================
-# run.do — system-level testbench for the full GPU (gpu_top_tb)
+# run.do — system-level testbench for the full GPU (gpu_top_tb), v2
+# (4-core shared-memory-controller architecture)
 #
 # Usage: do "C:/Users/User/Desktop/Year 3/DE1-SoC-GPU/tb/Top/run.do"
+# This is the canonical run script: it lives next to the canonical
+# gpu_top_tb.sv and compiles directly from the canonical rtl/. There is no
+# duplicate RTL tree involved here.
 # =============================================================================
 
 # Hardcoded absolute paths (forward slashes — Tcl-safe)
@@ -16,15 +20,20 @@ puts "Working dir: [pwd]"
 if {[file isdirectory work]} { vdel -lib work -all }
 vlib work
 
-# ── Compile all RTL sources from rtl/ ─────────────────────────
+# ── Compile all RTL sources (v2: shared memory controller, NUM_CORES-generic) ──
 puts "Compiling RTL..."
 vlog -sv "$RTL_DIR/fma.sv"
 vlog -sv "$RTL_DIR/thread.sv"
+vlog -sv "$RTL_DIR/dual_port_bram.sv"
+vlog -sv "$RTL_DIR/rr_read_arbiter.sv"
+vlog -sv "$RTL_DIR/rr_write_arbiter.sv"
 vlog -sv "$RTL_DIR/scheduler.sv"
 vlog -sv "$RTL_DIR/core.sv"
 vlog -sv "$RTL_DIR/dispatcher.sv"
-vlog -sv "$RTL_DIR/mem_controller.sv"
 vlog -sv "$RTL_DIR/gpu_top.sv"
+vlog -sv "$RTL_DIR/gpu_mem_master.sv"
+vlog -sv "$RTL_DIR/mem_controller.sv"
+vlog -sv "$RTL_DIR/de1soc_top.sv"
 
 # ── Compile testbench ────────────────────────────────────────
 puts "Compiling testbench..."
@@ -42,7 +51,7 @@ if {![batch_mode]} {
     add wave -position end sim:/gpu_top_tb/done
     add wave -position end sim:/gpu_top_tb/N
 
-    add wave -divider "BRAM_A (input matrices)"
+    add wave -divider "BRAM_A (input matrix A)"
     add wave -position end sim:/gpu_top_tb/bram_a_addr
     add wave -position end sim:/gpu_top_tb/bram_a_rd_en
     add wave -position end sim:/gpu_top_tb/bram_a_rd_data
@@ -58,21 +67,17 @@ if {![batch_mode]} {
     add wave -position end sim:/gpu_top_tb/dut/u_dispatcher/core_ready
     add wave -position end sim:/gpu_top_tb/dut/u_dispatcher/core_start
     add wave -position end sim:/gpu_top_tb/dut/u_dispatcher/core_done
+    add wave -position end sim:/gpu_top_tb/dut/u_dispatcher/next_thread_id
+    add wave -position end sim:/gpu_top_tb/dut/u_dispatcher/threads_remaining
 
-    add wave -divider "Per-core memory traffic"
-    add wave -position end sim:/gpu_top_tb/dut/core_mem_read_valid
-    add wave -position end sim:/gpu_top_tb/dut/core_mem_read_ready
-    add wave -position end sim:/gpu_top_tb/dut/core_mem_read_addr
-    add wave -position end sim:/gpu_top_tb/dut/core_mem_write_valid
-    add wave -position end sim:/gpu_top_tb/dut/core_mem_write_ready
-    add wave -position end sim:/gpu_top_tb/dut/core_mem_write_addr
-    add wave -position end sim:/gpu_top_tb/dut/core_mem_write_data
+    add wave -divider "A read arbiter (round-robin)"
+    add wave -position end sim:/gpu_top_tb/dut/u_a_arbiter/ptr
+    add wave -position end sim:/gpu_top_tb/dut/u_a_arbiter/grant
+    add wave -position end sim:/gpu_top_tb/dut/u_a_arbiter/stall_cycles
 
-    add wave -divider "Mem controller arbiter"
-    add wave -position end sim:/gpu_top_tb/dut/u_mem_controller/read_ptr
-    add wave -position end sim:/gpu_top_tb/dut/u_mem_controller/write_ptr
-    add wave -position end sim:/gpu_top_tb/dut/u_mem_controller/read_grant
-    add wave -position end sim:/gpu_top_tb/dut/u_mem_controller/write_grant
+    add wave -divider "C write arbiter (round-robin)"
+    add wave -position end sim:/gpu_top_tb/dut/u_c_arbiter/grant
+    add wave -position end sim:/gpu_top_tb/dut/u_c_arbiter/stall_cycles
 
     configure wave -timelineunits ns
 }

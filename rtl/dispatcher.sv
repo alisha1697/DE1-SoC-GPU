@@ -139,9 +139,22 @@ module dispatcher #(
                         end
                     end
  
-                    // Step 2: handle completions 
+                    // Step 2: handle completions
+                    // NOTE: must NOT clear core_busy[i] for a core that is
+                    // simultaneously being re-handshaked this same cycle
+                    // (Step 1, above). core_start[i] is only registered this
+                    // cycle -- it doesn't actually reach the core's `start`
+                    // input until next cycle -- so a core beginning its NEXT
+                    // block still reports its PREVIOUS kernel's done=1 for
+                    // one more cycle. Without the !handshake[i] guard, this
+                    // stale done clobbers Step 1's busy<=1 (last write in
+                    // program order wins for repeated NBA writes to the same
+                    // variable), making the dispatcher believe the core is
+                    // free again one cycle later and hand it a THIRD block
+                    // on top of the still-running second one, corrupting
+                    // live thread_id_start/thread_count mid-kernel.
                     for (int i = 0; i < NUM_CORES; i++) begin
-                        if (core_done[i]) begin
+                        if (core_done[i] && !handshake[i]) begin
                             core_busy[i] <= 1'b0;
                         end
                     end

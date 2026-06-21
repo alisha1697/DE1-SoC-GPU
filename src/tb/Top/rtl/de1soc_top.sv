@@ -7,27 +7,28 @@
 //   - LEDR[9:0]        : status LEDs (LEDR[0]=done)
 //   - HEX0..HEX3       : 7-seg, latched to C[0][0] when it gets written
 //
-// Memory architecture:
-//   - 3x dual_port_bram instances — one for A (read-only), B (read-only),
-//     C (write-only by the GPU, but the BRAM itself is full read/write).
-//   - Port A of each BRAM dedicated to core 0.
-//   - Port B of each BRAM dedicated to core 1.
-//   - Result: zero memory arbitration. Each core gets 1 read of A, 1 read of
-//     B, and 1 write of C per cycle, fully in parallel.
+// Memory architecture (memory-controller version — Choice B, NUM_CORES=4):
+//   - 3x dual_port_bram instances — one each for A, B, C.
+//   - Only PORT A of each BRAM is used; it is shared by all NUM_CORES cores
+//     through a round-robin arbiter inside gpu_top (rr_read_arbiter for A/B,
+//     rr_write_arbiter for C). Port B is tied off/unused here — it's free
+//     bandwidth for a future revision (e.g. host readback of C) but is not
+//     needed for this architecture.
+//   - Unlike the old 2-core design (one BRAM port per core, zero
+//     arbitration), 4 cores now contend for one read port on A, one read
+//     port on B, and one write port on C. That contention is the point:
+//     it's what makes the memory controller's round-robin grant logic and
+//     per-core stall counters mean something.
 //
-//   This is the optimal architecture for NUM_CORES = 2 on this FPGA. The
-//   M10K BRAMs are natively dual-port; we use exactly the bandwidth they
-//   provide and no more. Scaling beyond 2 cores would need either banking
-//   (split A across BRAM banks by address bit) or arbitration (the
-//   mem_controller.sv module, which is verified standalone but not used
-//   here).
+// NUM_CORES is a true parameter here — bump it (and watch a/b/c_stall_cycles
+// climb) to see the scalability/contention tradeoff directly.
 // =============================================================================
 `timescale 1ns/1ps
 
 module de1soc_top #(
     parameter DATA_WIDTH       = 16,
     parameter ADDR_WIDTH       = 16,
-    parameter NUM_CORES        = 2,    // wired to dual-port BRAMs; do not change without rework
+    parameter NUM_CORES        = 4,
     parameter THREADS_PER_CORE = 2,
     parameter BRAM_DEPTH       = 256,
     parameter N_MAT            = 4     // matrix dimension for this build
@@ -60,16 +61,27 @@ module de1soc_top #(
     logic [ADDR_WIDTH-1:0]   base_addr_B = '0;
     logic [ADDR_WIDTH-1:0]   base_addr_C = '0;
 
-    // ── Per-core BRAM wires (between gpu_top and the dual_port_bram instances)
-    logic [ADDR_WIDTH-1:0]   bram_a_addr    [NUM_CORES-1:0];
-    logic [DATA_WIDTH-1:0]   bram_a_rd_data [NUM_CORES-1:0];
-    logic [ADDR_WIDTH-1:0]   bram_b_addr    [NUM_CORES-1:0];
-    logic [DATA_WIDTH-1:0]   bram_b_rd_data [NUM_CORES-1:0];
-    logic [ADDR_WIDTH-1:0]   bram_c_addr    [NUM_CORES-1:0];
-    logic [DATA_WIDTH-1:0]   bram_c_wr_data [NUM_CORES-1:0];
-    logic [NUM_CORES-1:0]    bram_c_wr_en;
+    // ── Single shared BRAM port per matrix (arbitrated inside gpu_top) ──
+    logic [ADDR_WIDTH-1:0]   bram_a_addr;
+    logic                    bram_a_rd_en;
+    logic [DATA_WIDTH-1:0]   bram_a_rd_data;
+
+    logic [ADDR_WIDTH-1:0]   bram_b_addr;
+    logic                    bram_b_rd_en;
+    logic [DATA_WIDTH-1:0]   bram_b_rd_data;
+
+    logic [ADDR_WIDTH-1:0]   bram_c_addr;
+    logic [DATA_WIDTH-1:0]   bram_c_wr_data;
+    logic                    bram_c_wr_en;
 
     logic done;
+
+    // ── Debug counters from gpu_top ─────────────────────────────────────
+    logic [31:0] a_grant_count [NUM_CORES-1:0];
+    logic [31:0] b_grant_count [NUM_CORES-1:0];
+    logic [31:0] c_grant_count [NUM_CORES-1:0];
+    logic [31:0] a_stall_cycles, b_stall_cycles, c_stall_cycles;
+    logic [31:0] core_stall_cycles [NUM_CORES-1:0];
 
     // ── GPU ─────────────────────────────────────────────────────────────
     gpu_top #(
@@ -85,58 +97,83 @@ module de1soc_top #(
         .base_addr_A    (base_addr_A),
         .base_addr_B    (base_addr_B),
         .base_addr_C    (base_addr_C),
+
         .bram_a_addr    (bram_a_addr),
+        .bram_a_rd_en   (bram_a_rd_en),
         .bram_a_rd_data (bram_a_rd_data),
+
         .bram_b_addr    (bram_b_addr),
+        .bram_b_rd_en   (bram_b_rd_en),
         .bram_b_rd_data (bram_b_rd_data),
+
         .bram_c_addr    (bram_c_addr),
         .bram_c_wr_data (bram_c_wr_data),
         .bram_c_wr_en   (bram_c_wr_en),
-        .done           (done)
+
+        .done              (done),
+        .a_grant_count     (a_grant_count),
+        .b_grant_count     (b_grant_count),
+        .c_grant_count     (c_grant_count),
+        .a_stall_cycles    (a_stall_cycles),
+        .b_stall_cycles    (b_stall_cycles),
+        .c_stall_cycles    (c_stall_cycles),
+        .core_stall_cycles (core_stall_cycles)
     );
 
     // ── BRAM A (input matrix A) ─────────────────────────────────────────
-    // Read-only from the GPU's perspective — write enables are tied low.
+    // Only port A used — shared by all cores via the read arbiter in
+    // gpu_top. Port B is tied off (reserved for future host readback).
+    logic [DATA_WIDTH-1:0] bram_a_portb_unused;
     dual_port_bram #(
         .DATA_WIDTH (DATA_WIDTH),
         .ADDR_WIDTH (ADDR_WIDTH),
         .DEPTH      (BRAM_DEPTH)
     ) bram_A (
         .clk       (clk),
-        .a_addr    (bram_a_addr[0]),  .a_wr_en (1'b0), .a_wr_data ('0), .a_rd_data (bram_a_rd_data[0]),
-        .b_addr    (bram_a_addr[1]),  .b_wr_en (1'b0), .b_wr_data ('0), .b_rd_data (bram_a_rd_data[1])
+        .a_addr    (bram_a_addr), .a_wr_en (1'b0), .a_wr_data ('0), .a_rd_data (bram_a_rd_data),
+        .b_addr    ('0),          .b_wr_en (1'b0), .b_wr_data ('0), .b_rd_data (bram_a_portb_unused)
     );
 
     // ── BRAM B (input matrix B) ─────────────────────────────────────────
+    logic [DATA_WIDTH-1:0] bram_b_portb_unused;
     dual_port_bram #(
         .DATA_WIDTH (DATA_WIDTH),
         .ADDR_WIDTH (ADDR_WIDTH),
         .DEPTH      (BRAM_DEPTH)
     ) bram_B (
         .clk       (clk),
-        .a_addr    (bram_b_addr[0]),  .a_wr_en (1'b0), .a_wr_data ('0), .a_rd_data (bram_b_rd_data[0]),
-        .b_addr    (bram_b_addr[1]),  .b_wr_en (1'b0), .b_wr_data ('0), .b_rd_data (bram_b_rd_data[1])
+        .a_addr    (bram_b_addr), .a_wr_en (1'b0), .a_wr_data ('0), .a_rd_data (bram_b_rd_data),
+        .b_addr    ('0),          .b_wr_en (1'b0), .b_wr_data ('0), .b_rd_data (bram_b_portb_unused)
     );
 
     // ── BRAM C (output matrix C) ────────────────────────────────────────
-    // Write-only from the GPU's perspective. Read data outputs are left
-    // unconnected; if you ever want to read C back (e.g. for HPS readback),
-    // expose them at this level.
-    logic [DATA_WIDTH-1:0] bram_c_rd_port_a_unused;
-    logic [DATA_WIDTH-1:0] bram_c_rd_port_b_unused;
+    // Write-only from the GPU's perspective via port A (shared by all
+    // cores through the write arbiter). Port B's read data is left
+    // unconnected; expose it at this level if host readback is needed.
+    logic [DATA_WIDTH-1:0] bram_c_rd_porta_unused;
+    logic [DATA_WIDTH-1:0] bram_c_rd_portb_unused;
     dual_port_bram #(
         .DATA_WIDTH (DATA_WIDTH),
         .ADDR_WIDTH (ADDR_WIDTH),
         .DEPTH      (BRAM_DEPTH)
     ) bram_C (
         .clk       (clk),
-        .a_addr    (bram_c_addr[0]),  .a_wr_en (bram_c_wr_en[0]), .a_wr_data (bram_c_wr_data[0]), .a_rd_data (bram_c_rd_port_a_unused),
-        .b_addr    (bram_c_addr[1]),  .b_wr_en (bram_c_wr_en[1]), .b_wr_data (bram_c_wr_data[1]), .b_rd_data (bram_c_rd_port_b_unused)
+        .a_addr    (bram_c_addr), .a_wr_en (bram_c_wr_en), .a_wr_data (bram_c_wr_data), .a_rd_data (bram_c_rd_porta_unused),
+        .b_addr    ('0),          .b_wr_en (1'b0),         .b_wr_data ('0),             .b_rd_data (bram_c_rd_portb_unused)
     );
 
     // ── Status LEDs ─────────────────────────────────────────────────────
     assign LEDR[0]   = done;
-    assign LEDR[9:1] = '0;
+    // LEDR[1] lit while any core is stalled on memory contention — quick
+    // visual confirmation the arbiters are actually doing something.
+    logic any_core_stalling;
+    always_comb begin
+        any_core_stalling = 1'b0;
+        for (int i = 0; i < NUM_CORES; i++)
+            if (core_stall_cycles[i] != 32'd0) any_core_stalling = 1'b1;
+    end
+    assign LEDR[1]   = any_core_stalling;
+    assign LEDR[9:2] = '0;
 
     // ── HEX displays: latch C[0][0] for visual verification ────────────
     // Holds 16'hDEAD until the first write to address 0 lands, then locks
@@ -146,8 +183,8 @@ module de1soc_top #(
     always_ff @(posedge clk) begin
         if (rst)
             hex_value <= 16'hDEAD;
-        else if (bram_c_wr_en[0] && (bram_c_addr[0] == '0))
-            hex_value <= bram_c_wr_data[0];
+        else if (bram_c_wr_en && (bram_c_addr == '0))
+            hex_value <= bram_c_wr_data;
     end
 
     seven_seg hd0 (.in(hex_value[3:0]),   .out(HEX0));
