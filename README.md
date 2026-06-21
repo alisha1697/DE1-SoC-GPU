@@ -158,7 +158,7 @@ block dispatches starts each kernel cleanly.
 | `rtl/rr_write_arbiter.sv`| Generic round-robin write arbiter, `NUM_CORES` -> 1 BRAM port. Used once (C). |
 | `rtl/thread.sv`          | One output element. Address generation + accumulator + one FMA. |
 | `rtl/fma.sv`             | Integer fused multiply-add: `result = a*b + c`. |
-| `rtl/dual_port_bram.sv`  | True dual-port BRAM, inferable to Cyclone V M10K. Three instances back the GPU; only port A is wired up in the current (v2) architecture. |
+| `rtl/dual_port_bram.sv`  | True dual-port BRAM, inferable to Cyclone V M10K. Used by `gpu_top_tb.sv`'s simulation-only A/B/C instances; on real hardware (`de1soc_top.sv`) it's superseded by the `matrix_ab`/`matrix_c` Quartus IP, see Hardware section below. |
 | `rtl/mem_controller.sv`  | v1-era combined-A/B-memory round-robin arbiter. Unit-tested in isolation (`src/tb/MemController/mem_controller_tb.sv`). Superseded by the separate `rr_read_arbiter`/`rr_write_arbiter` pair in v2; kept as reference. |
 | `rtl/gpu_mem_master.sv`  | Avalon-MM master stub for future SDRAM integration. |
 
@@ -197,8 +197,22 @@ DE1-SoC-GPU/
 |  |                     via relative path, NOT at the rtl/ copy in this folder.
 |- gpu_top_sim.do        Root-level run script. Run from the repo root; compiles
 |                        rtl/*.sv (canonical) + tb/Top/gpu_top_tb.sv directly.
-|- DE1-Soc/              Quartus project (DE1_SoC_Default.qpf and friends).
-|- SDRAM/                SDRAM controller IP scaffolding (work-in-progress).
+|- DE1-Soc/              Quartus project for the actual hardware build.
+|  |- DE1_SoC_GPU.qpf/.qsf  Open this. Top entity de1soc_top, file set =
+|  |                         rtl/*.sv + matrix_ab.v + matrix_c.qip, board
+|  |                         pin map included.
+|  |- matrix_ab.v        Quartus altsyncram IP — shared dual-port BRAM
+|  |                     backing both input matrices (A on port A, B on
+|  |                     port B, one physical block, see README below).
+|  |- matrix_ab.mif      Preload for matrix_ab: A at words 0..N*N-1, B at
+|                        words N*N..2*N*N-1.
+|  |- matrix_c.v / .qip  Quartus altsyncram IP (SINGLE_PORT, runtime-mod +
+|  |                     JTAG_ID="C") backing output matrix C. Readable at
+|  |                     runtime via In-System Memory Content Editor.
+|- SDRAM/                Earlier SDRAM controller IP scaffolding/experiment
+|                        (its own DE1_SoC_Default.qpf, unrelated to the
+|                        GPU build above — kept as reference for the
+|                        stock Terasic pin map).
 ```
 
 > History: this repo used to maintain `src/tb/Top/rtl/` as a manually-synced
@@ -272,10 +286,60 @@ the same way.
 
 ### Hardware (Quartus, DE1-SoC)
 
-The Quartus project lives under `DE1-Soc/`. Open `DE1_SoC_Default.qpf`,
-ensure the `rtl/*.sv` files are in the file set, set the top entity, and
-run Compile. Hardware bring-up (push-button start, LED done indicator, HEX
-display readback) is in progress and tracked separately.
+Open `DE1-Soc/DE1_SoC_GPU.qpf`. Its `.qsf` already has the file set
+(`rtl/*.sv` + `matrix_ab.v` + `matrix_c.qip`), top-level entity (`de1soc_top`), device
+(`5CSEMA5F31C6`, Cyclone V), and `CLOCK_50`/`KEY`/`LEDR`/`HEX0-3` pin
+locations configured — just run Compile. Pin locations were copied from
+Terasic's stock `SDRAM/DE1_SoC_Default.qsf` (those are fixed by the
+physical board); unused peripherals (ADC, audio, DRAM, GPIO, HEX4/5) are
+deliberately left out of this project's pin map and file set.
+`gpu_mem_master.sv` and `mem_controller.sv` are also deliberately excluded
+from the file set — Quartus parses every added HDL file regardless of
+whether it's instantiated, and `gpu_mem_master.sv` has a known unresolved
+syntax error that would otherwise block compilation of dead code.
+
+Hardware bring-up (push-button start, LED done indicator, HEX display
+readback) is in progress and tracked separately.
+
+**Matrix A/B memory on real hardware:** `de1soc_top.sv` no longer uses
+`dual_port_bram` for matrices A and B — it instantiates `matrix_ab`
+(`DE1-Soc/matrix_ab.v`, a Quartus `altsyncram` megafunction in
+`BIDIR_DUAL_PORT` mode). This is **one** 256-word x 16-bit physical block
+with two independent access ports, not two separate buffers: port A serves
+matrix A starting at `base_addr_A = 0`, port B serves matrix B starting at
+`base_addr_B = N*N`, both within the same underlying array. This is a more
+faithful use of the M10K's native dual-port hardware than the simulation
+path's two separate single-port-used BRAMs (which is unaffected — `gpu_top_tb.sv`
+instantiates `gpu_top` directly and still uses two independent
+`dual_port_bram` instances for A/B, so ModelSim results aren't touched by
+this change).
+
+`matrix_ab` is preloaded at configuration time from `DE1-Soc/matrix_ab.mif`
+(word 0..N*N-1 = matrix A, word N*N..2*N*N-1 = matrix B; currently filled
+with `A[i] = B[i] = i+1` for `i = 0..15`, matching `gpu_top_tb.sv`'s 4x4 test
+vectors so a hardware run is directly comparable to the passing simulation).
+`wren_a`/`wren_b` are tied low — there is no runtime write path into this
+block; to change the input matrices, edit `matrix_ab.mif` and recompile.
+
+**Matrix C (output) on real hardware:** `de1soc_top.sv` also no longer uses
+`dual_port_bram` for matrix C — it instantiates `matrix_c`
+(`DE1-Soc/matrix_c.v`, a Quartus `altsyncram` megafunction in `SINGLE_PORT`
+mode with `lpm_hint = "ENABLE_RUNTIME_MOD=YES,INSTANCE_NAME=C"` and
+`JTAG_ENABLED = "1"`). The GPU's write arbiter drives `wren`/`address`/`data`
+exactly as it drove `dual_port_bram`'s port A before; `rden` is tied high and
+`q` is left unused since the GPU itself never reads C back. Runtime-mod +
+JTAG together make Quartus auto-insert a virtual-JTAG/SLD hub for this block
+at compile time — no extra top-level pins are needed for it. After
+programming the board, open Tools > In-System Memory Content Editor in
+Quartus, connect to the JTAG chain, and the block shows up as instance `C`;
+reading it there is the intended way to inspect the matmul result on
+hardware, instead of (or in addition to) the HEX0-3 display, which still only
+shows `C[0][0]`. As with `matrix_ab`, this is hardware-only — `gpu_top_tb.sv`
+still uses an independent `dual_port_bram` for C in simulation, unaffected.
+Add `<quartus_install>/eda/sim_lib/altera_mf.v` (or `-L altera_mf_ver`) to
+the ModelSim compile/elaborate step if you ever need to simulate
+`de1soc_top.sv` itself, since `altsyncram` needs the `altera_mf` simulation
+library — `gpu_top_tb.sv` avoids this today by testing `gpu_top` directly.
 
 ---
 

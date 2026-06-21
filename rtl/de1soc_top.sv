@@ -8,12 +8,15 @@
 //   - HEX0..HEX3       : 7-seg, latched to C[0][0] when it gets written
 //
 // Memory architecture (memory-controller version — Choice B, NUM_CORES=4):
-//   - 3x dual_port_bram instances — one each for A, B, C.
-//   - Only PORT A of each BRAM is used; it is shared by all NUM_CORES cores
-//     through a round-robin arbiter inside gpu_top (rr_read_arbiter for A/B,
-//     rr_write_arbiter for C). Port B is tied off/unused here — it's free
-//     bandwidth for a future revision (e.g. host readback of C) but is not
-//     needed for this architecture.
+//   - matrix_ab: one Quartus altsyncram IP (BIDIR_DUAL_PORT) shared by A and
+//     B, addressed at disjoint offsets within the same 256-word block.
+//   - matrix_c: one Quartus altsyncram IP (SINGLE_PORT, ENABLE_RUNTIME_MOD)
+//     for the output matrix. Write-only from the GPU; readable at runtime
+//     via the In-System Memory Content Editor (auto-wired JTAG, no extra
+//     top-level pins) instead of a second BRAM port.
+//   - All NUM_CORES cores share one read port on A, one read port on B, and
+//     one write port on C through round-robin arbiters inside gpu_top
+//     (rr_read_arbiter for A/B, rr_write_arbiter for C).
 //   - Unlike the old 2-core design (one BRAM port per core, zero
 //     arbitration), 4 cores now contend for one read port on A, one read
 //     port on B, and one write port on C. That contention is the point:
@@ -58,7 +61,10 @@ module de1soc_top #(
     // ── Kernel parameters (hardcoded for this hardware build) ──────────
     logic [7:0]              N           = N_MAT[7:0];
     logic [ADDR_WIDTH-1:0]   base_addr_A = '0;
-    logic [ADDR_WIDTH-1:0]   base_addr_B = '0;
+    // A and B now share one physical dual-port BRAM (matrix_ab, see below),
+    // so B must live at a disjoint offset within that same 256-word array.
+    // base_addr_B = N*N puts B right after A's N*N words.
+    logic [ADDR_WIDTH-1:0]   base_addr_B = ADDR_WIDTH'(N_MAT * N_MAT);
     logic [ADDR_WIDTH-1:0]   base_addr_C = '0;
 
     // ── Single shared BRAM port per matrix (arbitrated inside gpu_top) ──
@@ -120,46 +126,47 @@ module de1soc_top #(
         .core_stall_cycles (core_stall_cycles)
     );
 
-    // ── BRAM A (input matrix A) ─────────────────────────────────────────
-    // Only port A used — shared by all cores via the read arbiter in
-    // gpu_top. Port B is tied off (reserved for future host readback).
-    logic [DATA_WIDTH-1:0] bram_a_portb_unused;
-    dual_port_bram #(
-        .DATA_WIDTH (DATA_WIDTH),
-        .ADDR_WIDTH (ADDR_WIDTH),
-        .DEPTH      (BRAM_DEPTH)
-    ) bram_A (
-        .clk       (clk),
-        .a_addr    (bram_a_addr), .a_wr_en (1'b0), .a_wr_data ('0), .a_rd_data (bram_a_rd_data),
-        .b_addr    ('0),          .b_wr_en (1'b0), .b_wr_data ('0), .b_rd_data (bram_a_portb_unused)
-    );
-
-    // ── BRAM B (input matrix B) ─────────────────────────────────────────
-    logic [DATA_WIDTH-1:0] bram_b_portb_unused;
-    dual_port_bram #(
-        .DATA_WIDTH (DATA_WIDTH),
-        .ADDR_WIDTH (ADDR_WIDTH),
-        .DEPTH      (BRAM_DEPTH)
-    ) bram_B (
-        .clk       (clk),
-        .a_addr    (bram_b_addr), .a_wr_en (1'b0), .a_wr_data ('0), .a_rd_data (bram_b_rd_data),
-        .b_addr    ('0),          .b_wr_en (1'b0), .b_wr_data ('0), .b_rd_data (bram_b_portb_unused)
+    // ── Matrix A/B memory: one shared dual-port BRAM IP ─────────────────
+    // matrix_ab (Quartus altsyncram megafunction, BIDIR_DUAL_PORT) is ONE
+    // 256-word x 16-bit array with two independent access ports — not two
+    // separate buffers. Port A reads matrix A starting at base_addr_A=0;
+    // port B reads matrix B starting at base_addr_B=N*N, in the SAME
+    // physical block. This genuinely uses both ports (vs. the old
+    // dual_port_bram instances, which each only used port A and left port B
+    // tied off). Preloaded from DE1-Soc/matrix_ab.mif at configuration time;
+    // there is no runtime write path here (wren tied low) — reload the .mif
+    // and recompile to change inputs.
+    // NOTE: this particular wizard config of matrix_ab has no rden_a/rden_b
+    // ports at all (read is implicitly always-on) — bram_a_rd_en/bram_b_rd_en
+    // from gpu_top are simply left unconnected here.
+    matrix_ab u_matrix_ab (
+        .address_a (bram_a_addr[7:0]),
+        .address_b (bram_b_addr[7:0]),
+        .clock     (clk),
+        .data_a    (16'd0),
+        .data_b    (16'd0),
+        .wren_a    (1'b0),
+        .wren_b    (1'b0),
+        .q_a       (bram_a_rd_data),
+        .q_b       (bram_b_rd_data)
     );
 
     // ── BRAM C (output matrix C) ────────────────────────────────────────
-    // Write-only from the GPU's perspective via port A (shared by all
-    // cores through the write arbiter). Port B's read data is left
-    // unconnected; expose it at this level if host readback is needed.
-    logic [DATA_WIDTH-1:0] bram_c_rd_porta_unused;
-    logic [DATA_WIDTH-1:0] bram_c_rd_portb_unused;
-    dual_port_bram #(
-        .DATA_WIDTH (DATA_WIDTH),
-        .ADDR_WIDTH (ADDR_WIDTH),
-        .DEPTH      (BRAM_DEPTH)
-    ) bram_C (
-        .clk       (clk),
-        .a_addr    (bram_c_addr), .a_wr_en (bram_c_wr_en), .a_wr_data (bram_c_wr_data), .a_rd_data (bram_c_rd_porta_unused),
-        .b_addr    ('0),          .b_wr_en (1'b0),         .b_wr_data ('0),             .b_rd_data (bram_c_rd_portb_unused)
+    // matrix_c (Quartus altsyncram megafunction, SINGLE_PORT, ENABLE_RUNTIME_MOD=YES,
+    // JTAG_ID="C") replaces the old dual_port_bram instance. Write side is
+    // driven by gpu_top's write arbiter exactly as before. Host readback no
+    // longer needs a wired-up port B: ENABLE_RUNTIME_MOD + JTAG_ENABLED makes
+    // Quartus auto-insert a virtual-JTAG hub for this block, so it shows up
+    // as "C" in Tools > In-System Memory Content Editor at runtime with no
+    // extra top-level pins. q is unused here (GPU never reads C back).
+    logic [DATA_WIDTH-1:0] bram_c_q_unused;
+    matrix_c u_matrix_c (
+        .address (bram_c_addr[7:0]),
+        .clock   (clk),
+        .data    (bram_c_wr_data),
+        .rden    (1'b1),
+        .wren    (bram_c_wr_en),
+        .q       (bram_c_q_unused)
     );
 
     // ── Status LEDs ─────────────────────────────────────────────────────
