@@ -10,11 +10,10 @@
 //   req_ready  : combinational grant, same cycle as req_valid — "you got the
 //                bus this cycle". req_valid should drop the cycle after a
 //                grant if the core has nothing else queued.
-//   resp_valid : pulses exactly ONE cycle after a grant, on the same core's
-//                index, with the BRAM's registered read data. This works
-//                because dual_port_bram registers a_rd_data every cycle
-//                (1-cycle latency), so "whoever was granted last cycle" is
-//                exactly "whoever owns this cycle's data".
+//   resp_valid : pulses BRAM_READ_LATENCY cycles after a grant, on the same
+//                core's index, with the BRAM read data for that grant.
+//                BRAM_READ_LATENCY=1 → rtl/dual_port_bram.sv (sim).
+//                BRAM_READ_LATENCY=2 → Quartus altsyncram / matrix_ab (FPGA).
 //   resp_data  : broadcast BRAM data, qualified per-core by resp_valid.
 //
 // A core that loses arbitration simply sees req_ready stay low and re-asserts
@@ -27,9 +26,10 @@
 `timescale 1ns/1ns
 
 module rr_read_arbiter #(
-    parameter DATA_WIDTH = 16,
-    parameter ADDR_WIDTH = 16,
-    parameter NUM_CORES  = 4
+    parameter DATA_WIDTH        = 16,
+    parameter ADDR_WIDTH        = 16,
+    parameter NUM_CORES         = 4,
+    parameter BRAM_READ_LATENCY = 1
 )(
     input  logic                   clk,
     input  logic                   rst,
@@ -86,14 +86,21 @@ module rr_read_arbiter #(
             if (grant[i]) bram_addr = req_addr[i];
     end
 
-    // One cycle later, resp_valid points at whoever was granted last cycle —
-    // this lines up exactly with the BRAM's registered read-data latency.
-    logic [NUM_CORES-1:0] grant_d;
+    // Delay grant to align resp_valid with BRAM read-data latency.
+    logic [NUM_CORES-1:0] grant_pipe [0:BRAM_READ_LATENCY-1];
+
     always_ff @(posedge clk or posedge rst) begin
-        if (rst) grant_d <= '0;
-        else     grant_d <= grant;
+        if (rst) begin
+            for (int i = 0; i < BRAM_READ_LATENCY; i++)
+                grant_pipe[i] <= '0;
+        end else begin
+            grant_pipe[0] <= grant;
+            for (int i = 1; i < BRAM_READ_LATENCY; i++)
+                grant_pipe[i] <= grant_pipe[i - 1];
+        end
     end
-    assign resp_valid = grant_d;
+
+    assign resp_valid = grant_pipe[BRAM_READ_LATENCY - 1];
 
     genvar gi;
     generate

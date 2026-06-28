@@ -26,12 +26,13 @@
 `timescale 1ns/1ps
 
 module de1soc_top #(
-    parameter DATA_WIDTH       = 16,
-    parameter ADDR_WIDTH       = 16,
-    parameter NUM_CORES        = 4,
-    parameter THREADS_PER_CORE = 2,
-    parameter BRAM_DEPTH       = 256,
-    parameter N_MAT            = 4     // matrix dimension for this build
+    parameter DATA_WIDTH        = 16,
+    parameter ADDR_WIDTH        = 16,
+    parameter NUM_CORES         = 4,
+    parameter THREADS_PER_CORE  = 2,
+    parameter BRAM_DEPTH        = 256,
+    parameter BRAM_READ_LATENCY = 1,   // use 2 when BRAM is matrix_ab (2-cycle read)
+    parameter N_MAT             = 4     // matrix dimension for this build
 ) (
     input  logic         CLOCK_50,
     input  logic [3:0]   KEY,          // active-low
@@ -85,10 +86,11 @@ module de1soc_top #(
 
     // ── GPU ─────────────────────────────────────────────────────────────
     gpu_top #(
-        .DATA_WIDTH       (DATA_WIDTH),
-        .ADDR_WIDTH       (ADDR_WIDTH),
-        .NUM_CORES        (NUM_CORES),
-        .THREADS_PER_CORE (THREADS_PER_CORE)
+        .DATA_WIDTH        (DATA_WIDTH),
+        .ADDR_WIDTH        (ADDR_WIDTH),
+        .NUM_CORES         (NUM_CORES),
+        .THREADS_PER_CORE  (THREADS_PER_CORE),
+        .BRAM_READ_LATENCY (BRAM_READ_LATENCY)
     ) u_gpu (
         .clk            (clk),
         .rst            (rst),
