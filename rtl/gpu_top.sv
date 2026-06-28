@@ -16,10 +16,11 @@
 // =============================================================================
 
 module gpu_top #(
-    parameter DATA_WIDTH       = 16,
-    parameter ADDR_WIDTH       = 16,
-    parameter NUM_CORES        = 4,
-    parameter THREADS_PER_CORE = 2
+    parameter DATA_WIDTH        = 16,
+    parameter ADDR_WIDTH        = 16,
+    parameter NUM_CORES         = 4,
+    parameter THREADS_PER_CORE  = 2,
+    parameter BRAM_READ_LATENCY = 1
 )(
     input  logic                   clk,
     input  logic                   rst,
@@ -143,9 +144,10 @@ module gpu_top #(
 
     // ── A read arbiter ───────────────────────────────────────────────────
     rr_read_arbiter #(
-        .DATA_WIDTH (DATA_WIDTH),
-        .ADDR_WIDTH (ADDR_WIDTH),
-        .NUM_CORES  (NUM_CORES)
+        .DATA_WIDTH        (DATA_WIDTH),
+        .ADDR_WIDTH        (ADDR_WIDTH),
+        .NUM_CORES         (NUM_CORES),
+        .BRAM_READ_LATENCY (BRAM_READ_LATENCY)
     ) u_a_arbiter (
         .clk          (clk),
         .rst          (rst),
@@ -163,9 +165,10 @@ module gpu_top #(
 
     // ── B read arbiter ───────────────────────────────────────────────────
     rr_read_arbiter #(
-        .DATA_WIDTH (DATA_WIDTH),
-        .ADDR_WIDTH (ADDR_WIDTH),
-        .NUM_CORES  (NUM_CORES)
+        .DATA_WIDTH        (DATA_WIDTH),
+        .ADDR_WIDTH        (ADDR_WIDTH),
+        .NUM_CORES         (NUM_CORES),
+        .BRAM_READ_LATENCY (BRAM_READ_LATENCY)
     ) u_b_arbiter (
         .clk          (clk),
         .rst          (rst),
