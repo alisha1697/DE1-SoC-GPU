@@ -1,23 +1,10 @@
 // =============================================================================
-// dual_port_bram.sv — Synchronous true dual-port BRAM
+// File:    dual_port_bram.sv
 //
-// Two fully independent ports. Each has its own address, write enable,
-// write data and a registered read data output. Writes commit on the rising
-// edge; reads have one cycle of latency (Altera M10K "read-during-write —
-// old data" behaviour, which the rest of the design relies on via
-// scheduler's BRAM_LATENCY=1).
-//
-// Written in the canonical Quartus-inferable style so synthesis maps this
-// to native M10K blocks without needing a vendor primitive in the source.
-// The `(* ramstyle = "M10K" *)` attribute is an Altera hint; ModelSim and
-// other simulators ignore it.
-//
-// Memory initialisation:
-//   - For simulation, poke values via hierarchical reference from the
-//     testbench: e.g. `bram_A.mem[7] = 16'd42;`
-//   - For hardware, attach a Quartus .mif file in the Memory Initialization
-//     File pane of the project, or wrap this module and add a `$readmemh`
-//     in an `initial` block guarded by a synthesis pragma.
+// Module Description:
+//   Synchronous true dual-port BRAM, one cycle read latency.
+//   Simulation model used by gpu_top_tb; synthesis target is the Quartus IP.
+// =============================================================================
 //
 // This module is the architectural pivot that lets two cores share one
 // physical BRAM with zero arbitration: each core gets one of the two

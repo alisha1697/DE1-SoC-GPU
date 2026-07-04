@@ -5,12 +5,14 @@ altera_mf/
 *.cr.mti
 *.wlf
 wlf*
+*.vcd
 *.qdb
 *.qpg
 *.qtl
 _vmake
 _info
 transcript
+modelsim.ini
 
 # ── Backup files ───────────────────────────────────────────────────
 *.bak
@@ -43,3 +45,12 @@ output_files/
 # ── OS artifacts ───────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+
+# ── Quartus IP stubs in testbench dirs (not part of simulation flow) ──
+MATRIX_*.v
+
+# ── Archived / dead code ────────────────────────────────────────────
+# Old v1 source tree, rejected mem_controller/gpu_mem_master designs, and
+# the abandoned SDRAM Qsys exploration. Kept on disk for reference, not
+# tracked or compiled by any current build/sim script.
+archives/

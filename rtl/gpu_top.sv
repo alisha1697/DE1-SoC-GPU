@@ -1,25 +1,23 @@
 // =============================================================================
-// gpu_top.sv — Top-Level GPU Module (shared memory-controller version)
+// File:    gpu_top.sv
 //
-// NUM_CORES cores share three physical BRAM ports (A read, B read, C write)
-// through round-robin arbiters (rr_read_arbiter / rr_write_arbiter). This
-// replaces the old per-core dedicated-port architecture, which only worked
-// because dual-port BRAM gives exactly two ports — fine for NUM_CORES=2, but
-// it does not scale.
-//
-// Everything here is parameterized on NUM_CORES, so going from 4 to 8 (or
-// down to 1) is a parameter change, not a rewrite: the core array, the
-// arbiters, and the dispatcher all use generate/for loops over NUM_CORES.
-// The only thing that does NOT scale for free is physical BRAM bandwidth —
-// more cores sharing one port means more contention, which is the explicit
-// point of this design (see stall_cycles / grant_count below).
+// Module Description:
+//   Top-level GPU. Instantiates one dispatcher, NUM_CORES cores, and three
+//   round-robin arbiters (A read, B read, C write) for shared BRAM access.
 // =============================================================================
 
 module gpu_top #(
     parameter DATA_WIDTH       = 16,
     parameter ADDR_WIDTH       = 16,
     parameter NUM_CORES        = 4,
-    parameter THREADS_PER_CORE = 2
+    parameter THREADS_PER_CORE = 2,
+    // Cycles from a read grant to valid data on bram_a/b_rd_data. Default 1
+    // matches dual_port_bram (gpu_top_tb's simulation-only memory). The real
+    // Quartus altsyncram IP (matrix_ab.v) has 2-cycle latency and can't be
+    // configured down to 1 (its BIDIR_DUAL_PORT mode structurally requires
+    // a registered address input on both ports) -- de1soc_top overrides
+    // this to 2. See rr_read_arbiter.sv for where this is actually used.
+    parameter BRAM_READ_LATENCY = 1
 )(
     input  logic                   clk,
     input  logic                   rst,
@@ -29,8 +27,7 @@ module gpu_top #(
     input  logic [ADDR_WIDTH-1:0]  base_addr_B,
     input  logic [ADDR_WIDTH-1:0]  base_addr_C,
 
-    // Single shared BRAM port per matrix (one physical read/write port,
-    // arbitrated across all NUM_CORES cores)
+    //Matrix A, B, C BRAM ports
     output logic [ADDR_WIDTH-1:0]  bram_a_addr,
     output logic                   bram_a_rd_en,
     input  logic [DATA_WIDTH-1:0]  bram_a_rd_data,
@@ -45,7 +42,7 @@ module gpu_top #(
 
     output logic                   done,
 
-    // ── Debug / fairness instrumentation ────────────────────────────────
+    //Debug signals 
     output logic [31:0]            a_grant_count [NUM_CORES-1:0],
     output logic [31:0]            b_grant_count [NUM_CORES-1:0],
     output logic [31:0]            c_grant_count [NUM_CORES-1:0],
@@ -80,7 +77,7 @@ module gpu_top #(
     dispatcher #(
         .NUM_CORES        (NUM_CORES),
         .THREADS_PER_CORE (THREADS_PER_CORE)
-    ) u_dispatcher (
+    ) dispatcher_instance (
         .clk               (clk),
         .rst               (rst),
         .start             (start),
@@ -143,9 +140,10 @@ module gpu_top #(
 
     // ── A read arbiter ───────────────────────────────────────────────────
     rr_read_arbiter #(
-        .DATA_WIDTH (DATA_WIDTH),
-        .ADDR_WIDTH (ADDR_WIDTH),
-        .NUM_CORES  (NUM_CORES)
+        .DATA_WIDTH   (DATA_WIDTH),
+        .ADDR_WIDTH   (ADDR_WIDTH),
+        .NUM_CORES    (NUM_CORES),
+        .BRAM_LATENCY (BRAM_READ_LATENCY)
     ) u_a_arbiter (
         .clk          (clk),
         .rst          (rst),
@@ -163,9 +161,10 @@ module gpu_top #(
 
     // ── B read arbiter ───────────────────────────────────────────────────
     rr_read_arbiter #(
-        .DATA_WIDTH (DATA_WIDTH),
-        .ADDR_WIDTH (ADDR_WIDTH),
-        .NUM_CORES  (NUM_CORES)
+        .DATA_WIDTH   (DATA_WIDTH),
+        .ADDR_WIDTH   (ADDR_WIDTH),
+        .NUM_CORES    (NUM_CORES),
+        .BRAM_LATENCY (BRAM_READ_LATENCY)
     ) u_b_arbiter (
         .clk          (clk),
         .rst          (rst),

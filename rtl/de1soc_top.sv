@@ -1,30 +1,12 @@
 // =============================================================================
-// de1soc_top.sv — DE1-SoC board-level wrapper (what gets synthesised)
+// File:    de1soc_top.sv
 //
-// Brings the GPU up against the Terasic DE1-SoC's physical I/O:
-//   - CLOCK_50         : 50 MHz onboard oscillator
-//   - KEY[3:0]         : active-low push buttons (KEY[0]=reset, KEY[1]=start)
-//   - LEDR[9:0]        : status LEDs (LEDR[0]=done)
-//   - HEX0..HEX3       : 7-seg, latched to C[0][0] when it gets written
+// Module Description:
+//   Board-level wrapper for the DE1-SoC. Connects gpu_top to CLOCK_50, KEY,
+//   LEDR, and HEX displays; instantiates the two Quartus memory IPs.
 //
-// Memory architecture (memory-controller version — Choice B, NUM_CORES=4):
-//   - matrix_ab: one Quartus altsyncram IP (BIDIR_DUAL_PORT) shared by A and
-//     B, addressed at disjoint offsets within the same 256-word block.
-//   - matrix_c: one Quartus altsyncram IP (SINGLE_PORT, ENABLE_RUNTIME_MOD)
-//     for the output matrix. Write-only from the GPU; readable at runtime
-//     via the In-System Memory Content Editor (auto-wired JTAG, no extra
-//     top-level pins) instead of a second BRAM port.
-//   - All NUM_CORES cores share one read port on A, one read port on B, and
-//     one write port on C through round-robin arbiters inside gpu_top
-//     (rr_read_arbiter for A/B, rr_write_arbiter for C).
-//   - Unlike the old 2-core design (one BRAM port per core, zero
-//     arbitration), 4 cores now contend for one read port on A, one read
-//     port on B, and one write port on C. That contention is the point:
-//     it's what makes the memory controller's round-robin grant logic and
-//     per-core stall counters mean something.
-//
-// NUM_CORES is a true parameter here — bump it (and watch a/b/c_stall_cycles
-// climb) to see the scalability/contention tradeoff directly.
+// I/O:
+//   KEY[0]=reset, KEY[1]=start. LEDR[0]=done. HEX3..0: "DONE" or C[0][0].
 // =============================================================================
 `timescale 1ns/1ps
 
@@ -45,6 +27,9 @@ module de1soc_top #(
     output logic [6:0]   HEX3
 );
 
+
+
+
     // ── Clock and reset ─────────────────────────────────────────────────
     logic clk;
     assign clk = CLOCK_50;
@@ -57,6 +42,9 @@ module de1soc_top #(
     // pulses until the kernel completes.
     logic start;
     assign start = ~KEY[1];
+
+    // LEDR[1] lit while any core is stalled on memory contention
+    logic any_core_stalling;
 
     // ── Kernel parameters (hardcoded for this hardware build) ──────────
     logic [7:0]              N           = N_MAT[7:0];
@@ -91,10 +79,16 @@ module de1soc_top #(
 
     // ── GPU ─────────────────────────────────────────────────────────────
     gpu_top #(
-        .DATA_WIDTH       (DATA_WIDTH),
-        .ADDR_WIDTH       (ADDR_WIDTH),
-        .NUM_CORES        (NUM_CORES),
-        .THREADS_PER_CORE (THREADS_PER_CORE)
+        .DATA_WIDTH          (DATA_WIDTH),
+        .ADDR_WIDTH          (ADDR_WIDTH),
+        .NUM_CORES           (NUM_CORES),
+        .THREADS_PER_CORE    (THREADS_PER_CORE),
+        // matrix_ab (real altsyncram IP, BIDIR_DUAL_PORT) has a true
+        // 2-cycle read latency (registered address + registered output)
+        // that can't be configured down to 1 -- see matrix_ab.v and
+        // rr_read_arbiter.sv for the full story. gpu_top_tb's
+        // dual_port_bram-backed sim keeps the default of 1.
+        .BRAM_READ_LATENCY   (2)
     ) u_gpu (
         .clk            (clk),
         .rst            (rst),
@@ -169,18 +163,16 @@ module de1soc_top #(
         .q       (bram_c_q_unused)
     );
 
-    // ── Status LEDs ─────────────────────────────────────────────────────
+    // Status LEDs
     assign LEDR[0]   = done;
-    // LEDR[1] lit while any core is stalled on memory contention — quick
-    // visual confirmation the arbiters are actually doing something.
-    logic any_core_stalling;
+   
     always_comb begin
         any_core_stalling = 1'b0;
         for (int i = 0; i < NUM_CORES; i++)
             if (core_stall_cycles[i] != 32'd0) any_core_stalling = 1'b1;
     end
     assign LEDR[1]   = any_core_stalling;
-    assign LEDR[9:2] = '0;
+    assign LEDR[9:2] = 8'b0;
 
     // ── HEX displays: latch C[0][0] for visual verification ────────────
     // Holds 16'hDEAD until the first write to address 0 lands, then locks
@@ -194,10 +186,32 @@ module de1soc_top #(
             hex_value <= bram_c_wr_data;
     end
 
-    seven_seg hd0 (.in(hex_value[3:0]),   .out(HEX0));
-    seven_seg hd1 (.in(hex_value[7:4]),   .out(HEX1));
-    seven_seg hd2 (.in(hex_value[11:8]),  .out(HEX2));
-    seven_seg hd3 (.in(hex_value[15:12]), .out(HEX3));
+    // Decode C[0][0]'s four hex nibbles as usual; these feed the muxes below.
+    logic [6:0] hex0_digit, hex1_digit, hex2_digit, hex3_digit;
+    seven_seg hd0 (.in(hex_value[3:0]),   .out(hex0_digit));
+    seven_seg hd1 (.in(hex_value[7:4]),   .out(hex1_digit));
+    seven_seg hd2 (.in(hex_value[11:8]),  .out(hex2_digit));
+    seven_seg hd3 (.in(hex_value[15:12]), .out(hex3_digit));
+
+    // While `done` is asserted -- it's a sticky level (dispatcher.sv's FSM
+    // only clears it on the next `start` pulse, see the IDLE state; it does
+    // NOT drop back to 0 on its own), not a single-cycle pulse -- override
+    // all four displays to spell "DONE" instead of C[0][0]'s hex digits.
+    // 'O' and 'N' aren't real hex digits, so they can't go through
+    // seven_seg's 0-F decoder; their segment patterns are hardcoded here.
+    // D and E reuse the exact same shapes seven_seg already draws for hex
+    // digits 'd' and 'E'.
+    localparam logic [6:0] SEG_D = 7'b0100001;  // same shape as hex digit 'd'
+    localparam logic [6:0] SEG_O = 7'b1000000;  // same shape as hex digit '0'
+    localparam logic [6:0] SEG_N = 7'b0101011;  // lowercase 'n'
+    localparam logic [6:0] SEG_E = 7'b0000110;  // same shape as hex digit 'E'
+
+    // HEX3 is the leftmost digit on the board, so HEX3..HEX0 = D,O,N,E reads
+    // left-to-right as "DONE".
+    assign HEX3 = done ? SEG_D : hex3_digit;
+    assign HEX2 = done ? SEG_O : hex2_digit;
+    assign HEX1 = done ? SEG_N : hex1_digit;
+    assign HEX0 = done ? SEG_E : hex0_digit;
 
 endmodule
 

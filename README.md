@@ -46,11 +46,15 @@ core3  /
 
 Each core's `scheduler.sv` issues independent `a_req_valid`/`b_req_valid`
 requests for its current `A[row][k]` / `B[k][col]` operands. The arbiter
-grants one core per cycle; the granted core's read data comes back exactly
-one cycle later (matching `dual_port_bram`'s registered-output latency) on
-that core's `resp_valid`/`resp_data`. A core only proceeds to the FMA once
-*both* operands have arrived — until then it keeps re-asserting its request
-and stalls. Writes to `C` follow the same grant/stall pattern through a
+grants one core per cycle; the granted core's read data comes back
+`BRAM_LATENCY` cycles later (a parameter on `rr_read_arbiter.sv`, threaded
+through `gpu_top` as `BRAM_READ_LATENCY`) on that core's
+`resp_valid`/`resp_data`. Simulation's `dual_port_bram` is 1-cycle latency
+(the default); the real hardware build's `matrix_ab` IP is 2 cycles — see
+"Fixed: matrix-C corruption from a BRAM read-latency mismatch" below. A core
+only proceeds to the FMA once *both* operands have arrived — until then it
+keeps re-asserting its request and stalls, regardless of how many cycles
+that takes. Writes to `C` follow the same grant/stall pattern through a
 separate write arbiter.
 
 Every BRAM's port B is currently tied off/unused (free bandwidth reserved for
@@ -66,10 +70,14 @@ The old v1 per-core-port design and the standalone `mem_controller.sv`
 A/B/C arbiters) are kept in the repo as reference but are no longer wired
 into `gpu_top`.
 
-The board-level wrapper `rtl/de1soc_top.sv` instantiates the three BRAMs
-(port A only) and wires them to `gpu_top`. The simulation testbench
-instantiates the same BRAM modules, so what runs in ModelSim is what gets
-synthesised.
+The board-level wrapper `rtl/de1soc_top.sv` instantiates the two real Quartus
+memory IPs — `matrix_ab` (shared dual-port BRAM for A/B) and `matrix_c`
+(single-port output BRAM) — and wires them to `gpu_top`. `gpu_top_tb.sv`
+instead instantiates three `dual_port_bram` instances (A, B, C) as its
+simulation-only memory model, using only port A of each. So ModelSim's
+`gpu_top_tb` run and the synthesised `de1soc_top` differ in memory model;
+`de1soc_top_tb.sv` closes that gap by testing against the real IPs directly
+(see "Fixed: matrix-C corruption from a BRAM read-latency mismatch" below).
 
 ### Fixed: done/start race in multi-block re-dispatch
 
@@ -116,6 +124,40 @@ for any core that is simultaneously handshaking this cycle
 `done` from the kernel that's about to be superseded can never clear the
 busy bit the handshake step just set.
 
+### Fixed: matrix-C corruption from a BRAM read-latency mismatch (hardware-only)
+
+The board produced a corrupted output matrix `C` (visible via HEX display
+and the In-System Memory Content Editor) while the `gpu_top_tb.sv` simulation
+— which uses `dual_port_bram` — passed 100% clean. To get a repro, a
+hardware-accurate testbench (`tb/Top/de1soc_top_tb.sv` + `tb/Top/run_hw.do`)
+was built that instantiates `de1soc_top` directly, so the real `matrix_ab.v`/
+`matrix_c.v` Quartus `altsyncram` IPs are in the loop instead of
+`dual_port_bram`. That reproduced the corruption in simulation, proving it
+was a genuine RTL/IP-timing bug rather than a stale `.sof` or a JTAG-sampling
+artifact.
+
+Root cause: `rr_read_arbiter.sv` was hardcoded to assert `resp_valid` exactly
+one cycle after a grant, because `dual_port_bram` (combinational address
+into `mem[]`, registered output) has exactly 1-cycle read latency. The real
+`matrix_ab` IP (`BIDIR_DUAL_PORT` mode `altsyncram`) does not: its address
+input is structurally registered on both ports — confirmed by the
+`altsyncram` simulation model itself outright rejecting
+`address_reg_b = "UNREGISTERED"` (`Error: UNREGISTERED value for
+address_reg_b is not supported.`) — so it has a true 2-cycle latency
+(address register + output register). With the arbiter watching the wrong
+cycle, every granted core's data was read one grant early, producing an
+"off-by-one" corruption pattern across all of `C`.
+
+Fix: `rr_read_arbiter.sv` now takes a `BRAM_LATENCY` parameter (default `1`,
+so `dual_port_bram`-backed paths are unaffected) and pipelines `grant` that
+many cycles before driving `resp_valid`. `gpu_top.sv` exposes this as
+`BRAM_READ_LATENCY` (default `1`) and passes it to both the A and B
+arbiters. `de1soc_top.sv` overrides it to `2` when instantiating `gpu_top`,
+matching the real IP; `gpu_top_tb.sv` keeps the default of `1`. No changes
+were needed in `core.sv`/`scheduler.sv` — their req/resp protocol is fully
+`resp_valid`-driven with no hardcoded latency assumption, so cores simply
+stall the extra cycle correctly once the arbiter's timing matches reality.
+
 ### Contention instrumentation
 
 `gpu_top` exposes, per arbiter: `a_stall_cycles` / `b_stall_cycles` /
@@ -149,7 +191,7 @@ block dispatches starts each kernel cleanly.
 
 | File | Role |
 |---|---|
-| `rtl/de1soc_top.sv`      | Board-level wrapper. Instantiates gpu_top + 3 dual-port BRAMs (port A only) + button/LED/HEX I/O. **This is the synthesis top.** |
+| `rtl/de1soc_top.sv`      | Board-level wrapper. Instantiates gpu_top + the two real Quartus memory IPs (`matrix_ab`, `matrix_c`) + button/LED/HEX I/O. **This is the synthesis top.** |
 | `rtl/gpu_top.sv`         | GPU top. Instantiates dispatcher, `NUM_CORES` cores, and the A/B read arbiters + C write arbiter. Exposes one shared BRAM port per matrix plus contention counters. |
 | `rtl/dispatcher.sv`      | Greedy block dispatcher with a priority encoder picking the lowest-index free core each cycle. Fully `NUM_CORES`-generic. |
 | `rtl/core.sv`            | Per-core wrapper. Owns the scheduler, the thread instances, the A/B response latches, and the address MUXes. Talks to memory via req/resp handshake, not direct ports. |
@@ -173,6 +215,7 @@ larger configurations without source edits.
 | `ADDR_WIDTH` | 16 | Width of memory addresses. |
 | `NUM_CORES`  |  4 | Number of compute cores instantiated. Generic — the core array, dispatcher, and all three arbiters are `for`/`generate` loops over this parameter, so 8 or 16 is a parameter edit, not a rewrite. More cores means more contention on the shared A/B/C ports, which shows up directly as higher `stall_cycles`. |
 | `THREADS_PER_CORE` | 2 | Threads per core (block size). |
+| `BRAM_READ_LATENCY` (`gpu_top.sv`) / `BRAM_LATENCY` (`rr_read_arbiter.sv`) | 1 | Cycles from a read grant to valid data on the A/B ports. `1` matches `dual_port_bram` (simulation). `de1soc_top.sv` overrides this to `2` to match the real `matrix_ab` altsyncram IP's true latency (registered address + registered output) — see "Fixed: matrix-C corruption from a BRAM read-latency mismatch" above. |
 
 ---
 
@@ -182,8 +225,12 @@ larger configurations without source edits.
 DE1-SoC-GPU/
 |- rtl/                  Canonical synthesisable SystemVerilog. Source of truth.
 |- tb/                   ModelSim testbenches organised by module under test.
-|  |- Top/               System-level testbench (gpu_top_tb.sv) - the main one.
-|  |  |- run.do          Compiles directly from rtl/ via relative path. Use this.
+|  |- Top/               System-level testbenches.
+|  |  |- gpu_top_tb.sv     Tests gpu_top directly against dual_port_bram. The main one.
+|  |  |- run.do            Compiles directly from rtl/ via relative path. Use this.
+|  |  |- de1soc_top_tb.sv  Hardware-accurate: tests de1soc_top directly, so the real
+|  |  |                    matrix_ab/matrix_c altsyncram IPs are exercised.
+|  |  |- run_hw.do         Compiles + elaborates de1soc_top_tb.sv, incl. altera_mf.v.
 |  |- core/              Unit-level testbench for a single core.
 |  |- dispatcher/        ...
 |  |- fma/               ...
@@ -265,6 +312,25 @@ vlog -sv rtl/*.sv tb/Top/gpu_top_tb.sv
 vsim -gui work.gpu_top_tb
 run -all
 ```
+
+**Hardware-accurate variant:** `tb/Top/de1soc_top_tb.sv` + `tb/Top/run_hw.do`
+instantiate `de1soc_top` itself, so the real `matrix_ab.v`/`matrix_c.v`
+Quartus `altsyncram` IPs are in the loop for A/B reads and the C write,
+instead of `dual_port_bram`. Use this to test whether a board-only bug
+(corruption that doesn't show up in the `gpu_top_tb` run above) is caused by
+a genuine IP timing mismatch versus the simulation memory model, or whether
+it's downstream of the RTL entirely (stale `.sof`, JTAG sampling, etc.):
+
+```
+do "C:/Users/User/Desktop/Year 3/DE1-SoC-GPU/tb/Top/run_hw.do"
+```
+
+Requires the `altera_mf` simulation library to elaborate `altsyncram`.
+ModelSim-Altera/Intel-FPGA Starter/ASE Edition does not ship this
+precompiled, so `run_hw.do` compiles the `altera_mf.v` *source* (shipped
+with every Quartus install, under `<quartus install>/eda/sim_lib/`) directly
+into `work` — set the `ALTERA_MF` variable near the top of `run_hw.do` to
+your install's copy of that file if it differs from the path already there.
 
 A passing run prints:
 
@@ -353,7 +419,8 @@ library — `gpu_top_tb.sv` avoids this today by testing `gpu_top` directly.
 | `dispatcher_tb` | passing | Single-core and multi-core dispatch ordering. Interface unchanged in v2. |
 | `core_tb`       | **needs rework** | Written against the v1 `core.sv` interface (`addr_A_out`/`matrix_a_data`/`we_C`). Needs updating for the `a_req_*`/`b_req_*`/`c_req_*` interface. |
 | `mem_controller_tb` | passing | Round-robin arbiter standalone, v1-era combined-A/B design — kept as reference; not part of the current `gpu_top` wiring. |
-| `gpu_top_tb`    | passing | 4x4 system-level matmul with `NUM_CORES=4`, shared-memory-controller architecture. Prints stall/grant counters. This is the test that currently proves the v2 architecture end-to-end. |
+| `gpu_top_tb`    | passing | 4x4 system-level matmul with `NUM_CORES=4`, shared-memory-controller architecture, against `dual_port_bram` (`BRAM_READ_LATENCY=1`). Prints stall/grant counters. |
+| `de1soc_top_tb` | passing | Hardware-accurate variant of the above: instantiates `de1soc_top` directly, so the real `matrix_ab`/`matrix_c` Quartus `altsyncram` IPs (`BRAM_READ_LATENCY=2`) are exercised instead of `dual_port_bram`. This is the test that caught and now confirms the fix for the matrix-C read-latency corruption bug (see architecture history above) — it's the one that currently proves the v2 architecture end-to-end against the actual hardware IPs. |
 
 Unit-level `scheduler_tb` and `core_tb` are stale and should be rewritten
 against the new req/resp interface before relying on them again — they are

@@ -64,9 +64,7 @@ module fma_tb;
         @(posedge clk);
         valid_in = 0;
 
-        // Wait one cycle for output to settle/check
-        @(posedge clk);
-
+        // valid_out <= valid_in: high one cycle after valid_in was asserted
         if (valid_out !== 1'b1) begin
             $error("valid_out wrong: expected 1, got %0b", valid_out);
             errors++;
@@ -79,6 +77,7 @@ module fma_tb;
             $display("    result = %0d  PASS", result);
         end
 
+        @(posedge clk);
     endtask
 
     initial begin
@@ -109,6 +108,7 @@ module fma_tb;
             $display("\n=== FAIL: %0d errors ===", errors);
         end
 
+        $finish;
     end
 
 endmodule

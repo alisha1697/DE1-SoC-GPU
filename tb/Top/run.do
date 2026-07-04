@@ -31,8 +31,8 @@ vlog -sv "$RTL_DIR/scheduler.sv"
 vlog -sv "$RTL_DIR/core.sv"
 vlog -sv "$RTL_DIR/dispatcher.sv"
 vlog -sv "$RTL_DIR/gpu_top.sv"
-vlog -sv "$RTL_DIR/gpu_mem_master.sv"
-vlog -sv "$RTL_DIR/mem_controller.sv"
+# mem_controller.sv / gpu_mem_master.sv: rejected v1 designs, never wired
+# into gpu_top -- moved to archives/rtl/, not compiled here anymore.
 vlog -sv "$RTL_DIR/de1soc_top.sv"
 
 # ── Compile testbench ────────────────────────────────────────

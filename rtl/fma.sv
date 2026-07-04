@@ -1,3 +1,10 @@
+// =============================================================================
+// File:    fma.sv
+//
+// Module Description:
+//   Pipelined fused multiply-accumulate: result = (a * b) + c
+//   One cycle latency; valid_in/valid_out handshake.
+// =============================================================================
 module fma #(
     parameter DATA_WIDTH = 16
 )(

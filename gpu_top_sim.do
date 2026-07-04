@@ -20,8 +20,8 @@ vlog -sv rtl/rr_write_arbiter.sv
 vlog -sv rtl/core.sv
 vlog -sv rtl/dispatcher.sv
 vlog -sv rtl/dual_port_bram.sv
-vlog -sv rtl/mem_controller.sv
-#vlog -sv rtl/gpu_mem_master.sv
+# mem_controller.sv / gpu_mem_master.sv: rejected v1 designs, never wired
+# into gpu_top -- moved to archives/rtl/, not compiled here anymore.
 vlog -sv rtl/gpu_top.sv
 vlog -sv rtl/de1soc_top.sv
 

@@ -1,4 +1,14 @@
-// Thread: computes one output element C[i][j] via index/address generation and FMA accumulation
+// =============================================================================
+// File:    thread.sv
+//
+// Module Description:
+//   Computes one output element C[row][col] via address generation and FMA
+//   accumulation across the K-dimension.
+//
+// Interface:
+//   kernel_init resets the accumulator at the start of each kernel run.
+//   en gates the FMA each cycle a new A/B data pair is presented.
+// =============================================================================
 module thread #(
     parameter DATA_WIDTH = 16,
     parameter ADDR_WIDTH = 16

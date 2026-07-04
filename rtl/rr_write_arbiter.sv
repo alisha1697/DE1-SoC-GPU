@@ -1,14 +1,12 @@
 // =============================================================================
-// rr_write_arbiter.sv — Generic round-robin write arbiter, N cores -> 1 BRAM port
+// File:    rr_write_arbiter.sv
 //
-// Same shape as rr_read_arbiter but for writes. Writes commit combinationally
-// in the same cycle they're granted (no response latency to model), so the
-// protocol is simpler:
-//   req_valid : core wants to write req_addr/req_data
-//   req_ready : combinational grant == "your write committed this cycle"
+// Module Description:
+//   Round-robin write arbiter: NUM_CORES requesters share one BRAM write port.
+//   Writes commit in the same cycle they are granted (no response latency).
 //
-// A core that loses arbitration keeps req_valid asserted and re-requests
-// next cycle until granted.
+// Protocol:
+//   req_valid/req_ready: combinational grant; no resp path needed for writes.
 // =============================================================================
 `timescale 1ns/1ns
 

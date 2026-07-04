@@ -97,6 +97,25 @@ module matrix_ab (
 				.rden_a (1'b1),
 				.rden_b (1'b1));
 	defparam
+		// CONCLUSION (confirmed by simulation, not just theory): this
+		// altsyncram IP, in BIDIR_DUAL_PORT/M10K mode, has a real 2-cycle
+		// read latency (registered address + registered output) on BOTH
+		// ports, and that cannot be changed via parameters:
+		//   - address_reg_a isn't even exposed as a settable parameter in
+		//     this mode (unresolved defparam if you try to add it).
+		//   - address_reg_b IS exposed, but setting it to "UNREGISTERED"
+		//     is rejected outright by the altsyncram simulation model
+		//     itself ("Error: UNREGISTERED value for address_reg_b is not
+		//     supported."), which calls $finish before the testbench even
+		//     starts. This isn't an old-library gap -- the megafunction is
+		//     telling us this mode structurally requires a registered
+		//     address input.
+		// So address_reg_b is back to its original, supported "CLOCK0".
+		// The 1-cycle-latency assumption baked into rr_read_arbiter.sv
+		// (and matched by dual_port_bram.sv) is real silicon-mismatched
+		// against this IP's actual 2-cycle latency, and must be fixed on
+		// the RTL side instead (see rr_read_arbiter.sv's BRAM_LATENCY
+		// parameter), not by fighting this IP's parameter set further.
 		altsyncram_component.address_reg_b = "CLOCK0",
 		altsyncram_component.clock_enable_input_a = "BYPASS",
 		altsyncram_component.clock_enable_input_b = "BYPASS",

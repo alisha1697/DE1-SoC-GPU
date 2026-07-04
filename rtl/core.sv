@@ -1,33 +1,13 @@
-// core.sv
+// =============================================================================
+// File:    core.sv
 //
-// One compute core. Receives a block of work from the dispatcher via
-// valid/ready handshake + start pulse, runs the kernel via the scheduler,
-// reports done.
+// Module Description:
+//   One compute core. Receives a block from the dispatcher via valid/ready
+//   handshake + start pulse, runs the kernel via the scheduler, reports done.
 //
-// Internal pieces:
-//   - 1x scheduler   (the kernel FSM — now stall-aware, see scheduler.sv)
-//   - N x thread     (one per THREADS_PER_CORE, each contains an FMA)
-//   - Address MUXes  (pick t_select's thread address each cycle)
-//   - A/B latches    (hold the most recent granted read response stable
-//                     for the threads, since the shared bus value changes
-//                     as soon as another core's request is serviced)
-//
-// Memory interface (memory-controller version — Choice B):
-//   A, B and C are each behind their own round-robin arbiter
-//   (rr_read_arbiter / rr_write_arbiter in gpu_top.sv) shared by all cores.
-//   This core issues req_valid/req_addr and consumes req_ready/resp_valid/
-//   resp_data; it does NOT assume fixed memory latency or a dedicated port.
-//   A losing core simply keeps req_valid asserted and visibly stalls.
-//
-// Dispatcher interface:
-//   valid: dispatcher has a block ready for this core
-//   ready: core is idle and can accept a block
-//   start: 1-cycle pulse — kicks off the kernel
-//   thread_id_start, thread_count: block parameters
-//
-// NOTE on multi-block execution:
-//   The scheduler stays in DONE_ST after finishing a block until reset or a
-//   new start pulse (DONE_ST -> INIT transition is built in).
+// Contains:
+//   1x scheduler, THREADS_PER_CORE x thread, address MUXes, A/B resp latches.
+// =============================================================================
 
 `timescale 1ns/1ns
 

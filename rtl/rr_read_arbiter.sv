@@ -1,35 +1,20 @@
 // =============================================================================
-// rr_read_arbiter.sv — Generic round-robin read arbiter, N cores -> 1 BRAM port
+// File:    rr_read_arbiter.sv
 //
-// Fully parameterized on NUM_CORES. Used three times in gpu_top (well, twice
-// for reads — once for A, once for B) to let an arbitrary number of cores
-// share one physical BRAM read port.
+// Module Description:
+//   Round-robin read arbiter: NUM_CORES requesters share one BRAM read port.
+//   Grants are pipelined by BRAM_LATENCY cycles before asserting resp_valid.
 //
-// Protocol (per core):
-//   req_valid  : core wants to read req_addr
-//   req_ready  : combinational grant, same cycle as req_valid — "you got the
-//                bus this cycle". req_valid should drop the cycle after a
-//                grant if the core has nothing else queued.
-//   resp_valid : pulses exactly ONE cycle after a grant, on the same core's
-//                index, with the BRAM's registered read data. This works
-//                because dual_port_bram registers a_rd_data every cycle
-//                (1-cycle latency), so "whoever was granted last cycle" is
-//                exactly "whoever owns this cycle's data".
-//   resp_data  : broadcast BRAM data, qualified per-core by resp_valid.
-//
-// A core that loses arbitration simply sees req_ready stay low and re-asserts
-// req_valid next cycle — that visible stall is the whole point of this
-// exercise (vs. the duplicated-BRAM design where no core ever stalls).
-//
-// Fairness/debug: grant_count[i] increments every time core i is granted.
-// Wire these to a testbench or to LEDs/HEX to prove round-robin fairness.
+// Protocol:
+//   req_valid/req_ready: combinational grant. resp_valid: BRAM_LATENCY cycles later.
 // =============================================================================
 `timescale 1ns/1ns
 
 module rr_read_arbiter #(
-    parameter DATA_WIDTH = 16,
-    parameter ADDR_WIDTH = 16,
-    parameter NUM_CORES  = 4
+    parameter DATA_WIDTH   = 16,
+    parameter ADDR_WIDTH   = 16,
+    parameter NUM_CORES    = 4,
+    parameter BRAM_LATENCY = 1     // cycles from grant to valid read data
 )(
     input  logic                   clk,
     input  logic                   rst,
@@ -86,14 +71,27 @@ module rr_read_arbiter #(
             if (grant[i]) bram_addr = req_addr[i];
     end
 
-    // One cycle later, resp_valid points at whoever was granted last cycle —
-    // this lines up exactly with the BRAM's registered read-data latency.
-    logic [NUM_CORES-1:0] grant_d;
-    always_ff @(posedge clk or posedge rst) begin
-        if (rst) grant_d <= '0;
-        else     grant_d <= grant;
-    end
-    assign resp_valid = grant_d;
+    // BRAM_LATENCY cycles later, resp_valid points at whoever was granted
+    // BRAM_LATENCY cycles ago — this lines up with the BRAM's actual
+    // grant-to-valid-data latency (1 for dual_port_bram, 2 for the real
+    // altsyncram-based matrix_ab IP). grant_pipe[0] is the live grant;
+    // grant_pipe[BRAM_LATENCY] is what drives resp_valid. With
+    // BRAM_LATENCY=1 this is identical to the previous single-register
+    // grant_d behavior.
+    logic [NUM_CORES-1:0] grant_pipe [BRAM_LATENCY:0];
+    assign grant_pipe[0] = grant;
+
+    genvar gl;
+    generate
+        for (gl = 0; gl < BRAM_LATENCY; gl++) begin : g_latency
+            always_ff @(posedge clk or posedge rst) begin
+                if (rst) grant_pipe[gl+1] <= '0;
+                else     grant_pipe[gl+1] <= grant_pipe[gl];
+            end
+        end
+    endgenerate
+
+    assign resp_valid = grant_pipe[BRAM_LATENCY];
 
     genvar gi;
     generate

@@ -1,25 +1,12 @@
 // =============================================================================
-// scheduler.sv  (memory-controller version — stall-aware, NUM_CORES-agnostic)
+// File:    scheduler.sv
 //
-// Main FSM for one core. This version does NOT assume dedicated/fixed-latency
-// memory ports. A and B are each behind a round-robin arbiter shared by all
-// cores (rr_read_arbiter), and C is behind a shared write arbiter
-// (rr_write_arbiter). The scheduler issues valid/ready requests and only
-// advances once the memory system actually grants them — i.e. cores visibly
-// stall under contention instead of assuming a fixed BRAM_LATENCY.
+// Module Description:
+//   Kernel FSM for one core. Issues A/B read requests and C write requests
+//   through the shared round-robin arbiters; stalls visibly on contention.
 //
-//   for k = 0..N-1:
-//       for t = 0..thread_count-1:
-//           WAIT_AB    : request A[row][k] and B[k][col] independently.
-//                        Each can be granted/returned on a different cycle.
-//                        Stay here until BOTH have arrived.
-//           (pulse)    : data_valid[t] + fma_en[t] once both latched
-//   for t = 0..thread_count-1:
-//           WRITE_REQ  : request C[row][col] write; stay here until granted
-//
-// `stall_cycles` counts cycles spent waiting on memory once at least one
-// request has been issued — a direct, per-core measure of contention cost,
-// useful for proving the memory controller is doing something.
+// FSM states:
+//   IDLE → INIT → WAIT_AB (→ NEXT_T, NEXT_K) → WRITE_REQ (→ NEXT_W) → DONE_ST
 // =============================================================================
 module scheduler #(
     parameter THREADS_PER_CORE = 2,
