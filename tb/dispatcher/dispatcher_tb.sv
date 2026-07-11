@@ -1,4 +1,15 @@
+// =============================================================================
+// Module:  dispatcher_tb
+// Purpose: Dispatcher unit test with fake cores.
+//
+// Revision history:
+//   v1  Pouya Hatami
+//        Initial dispatcher testbench (fake cores, thread-ID checks).
+//   v2  Bruce Liu
+//        Documentation header / light maintenance. [EMPTY — note if more edits were made]
+// =============================================================================
 `timescale 1ns/1ns //wjat does this do?
+
 
 
 // the goal of this testbench is to pretend to be fake cores and respond to the dispachers signals 

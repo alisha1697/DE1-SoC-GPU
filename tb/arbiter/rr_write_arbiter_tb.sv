@@ -1,4 +1,15 @@
+// =============================================================================
+// Module:  rr_write_arbiter_tb
+// Author:  <name>
+// Date:    2026-07-10
+// Purpose: Unit test for rr_write_arbiter.
+//
+// Revision history:
+//   2026-07-10  Documentation header added.
+//            [EMPTY — add earlier revision notes from git / owners]
+// =============================================================================
 `timescale 1ns/1ps
+
 
 // =============================================================================
 // rr_write_arbiter_tb — unit test for v2 write arbiter (req_valid/ready, same-cycle commit)

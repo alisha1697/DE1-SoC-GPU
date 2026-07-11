@@ -1,16 +1,12 @@
 // =============================================================================
-// gpu_top_tb.sv -- system test for the 4-core shared-memory-controller GPU
+// Module:  gpu_top_tb
+// Purpose: System test: 4x4 matmul + contention report.
 //
-// Uses the actual `dual_port_bram` module as the memory model (only port A
-// is exercised; port B is tied off, same as de1soc_top.sv) so this
-// testbench proves the design works against the same memory blocks Quartus
-// will synthesise into M10K on the DE1-SoC.
-//
-// Unlike the old per-core-port testbench, all NUM_CORES cores now share one
-// physical port per matrix (A, B, C) through round-robin arbiters inside
-// gpu_top. This test checks both correctness (final C matrix matches a
-// software golden model) AND that contention is actually happening
-// (stall_cycles > 0, grants are reasonably balanced across cores).
+// Revision history:
+//   v1  Pouya Hatami
+//        Initial system-level testbench.
+//   v2  Bruce Liu / team
+//        Evolved with shared-memory gpu_top + dual_port_bram. [EMPTY — split exact authors if known]
 // =============================================================================
 `timescale 1ns/1ps
 

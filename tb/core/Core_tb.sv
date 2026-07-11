@@ -1,4 +1,15 @@
+// =============================================================================
+// Module:  Core_tb
+// Purpose: Unit test for v2 core (req/ready memory BFM).
+//
+// Revision history:
+//   v1  Pouya Hatami
+//        Initial testbench (Quartus MATRIX_* IP, SVA, v1 core ports).
+//   v2  Bruce Liu
+//        Full rewrite for v2 core: req/ready BFM, no SVA/IP, back-to-back / slow-mem cases.
+// =============================================================================
 `timescale 1ns/1ps
+
 
 // =============================================================================
 // Core_tb.sv — unit test for v2 core (scheduler + threads + req/ready memory)

@@ -1,3 +1,13 @@
+// =============================================================================
+// Module:  fma_tb
+// Purpose: Directed FMA unit tests.
+//
+// Revision history:
+//   v1  Pouya Hatami
+//        Initial directed FMA tests.
+//   v2  Bruce Liu
+//        Revised valid_out / result sampling timing for registered FMA.
+// =============================================================================
 module fma_tb;
 
     logic clk, rst;

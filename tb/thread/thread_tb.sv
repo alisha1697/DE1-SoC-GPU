@@ -1,4 +1,15 @@
+// =============================================================================
+// Module:  thread_tb
+// Purpose: Unit test for thread address gen + accumulate.
+//
+// Revision history:
+//   v1  Pouya Hatami
+//        Initial testbench (address gen + golden accumulate).
+//   v2  Bruce Liu
+//        Revised for kernel_init; added back-to-back kernel without full reset.
+// =============================================================================
 `timescale 1ns/1ps
+
 
 module thread_tb;
 
