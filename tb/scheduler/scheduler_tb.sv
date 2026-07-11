@@ -1,4 +1,15 @@
+// =============================================================================
+// Module:  scheduler_tb
+// Purpose: Unit test for v2 stall-aware scheduler.
+//
+// Revision history:
+//   v1  Pouya Hatami
+//        Initial testbench (older scheduler / handshake interface).
+//   v2  Bruce Liu
+//        Full rewrite for stall-aware req/ready scheduler (WAIT_AB, multi-block, latency cases).
+// =============================================================================
 `timescale 1ns/1ps
+
 
 // =============================================================================
 // scheduler_tb.sv — unit test for v2 scheduler (stall-aware req/ready memory)
