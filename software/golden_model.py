@@ -13,7 +13,7 @@ ST    : terminal stock prices
 """
 
 import numpy as np
-from scipy.stats import norm
+from scipy.stats import binom, norm
 
 
 # The confidence level is how wide you want the error band for the Monte
@@ -22,6 +22,11 @@ from scipy.stats import norm
 # constant.
 CONFIDENCE_LEVEL = 0.95
 CONFIDENCE_Z_SCORE = norm.ppf(0.5 + CONFIDENCE_LEVEL / 2)
+
+# A calibrated confidence interval will not hit its target coverage exactly in
+# a finite number of runs. Use a central binomial prediction interval so the
+# coverage test has a defined false-rejection rate instead of arbitrary bounds.
+COVERAGE_ACCEPTANCE_LEVEL = 0.99
 
 # Corner cases were chosen at the extremes of the two parameters that
 # actually reshape the payoff distribution, since that shape is what
@@ -210,14 +215,25 @@ def check_base_case():
             coverage_hits += 1
 
     coverage = coverage_hits / num_runs
+    min_coverage_hits, max_coverage_hits = (
+        int(bound)
+        for bound in binom.interval(
+            COVERAGE_ACCEPTANCE_LEVEL,
+            num_runs,
+            CONFIDENCE_LEVEL,
+        )
+    )
 
     print(
         f"CI coverage over {num_runs} seeds : "
         f"{coverage:.3f} (want approximately {CONFIDENCE_LEVEL:.0%})"
     )
 
-    assert 0.85 <= coverage <= 1.0, (
-        f"Confidence-interval coverage is far from {CONFIDENCE_LEVEL:.0%}."
+    assert min_coverage_hits <= coverage_hits <= max_coverage_hits, (
+        f"Confidence-interval coverage is far from {CONFIDENCE_LEVEL:.0%}: "
+        f"got {coverage_hits}/{num_runs} hits; expected between "
+        f"{min_coverage_hits}/{num_runs} and {max_coverage_hits}/{num_runs} "
+        f"at the {COVERAGE_ACCEPTANCE_LEVEL:.0%} acceptance level."
     )
 
     # Check E[ST] = S0 * exp(rT).
